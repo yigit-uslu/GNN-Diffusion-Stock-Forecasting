@@ -7,6 +7,8 @@ from tqdm import tqdm
 import wandb
 import abc
 
+from datasets.utils import daily_log_returns_to_closing_prices, daily_log_returns_to_log_returns
+from models.utils import get_regression_errors, log_plot_regression_errors
 from utils.diffusion_model_utils import save_cd_train_chkpt
 
 
@@ -119,7 +121,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
 
     def make_validation_criteria_fnc(self):
-        return make_validation_criteria_fnc(min_epoch=50, validate_freq=200, max_loss = 0.20)
+        return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
+        # return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
     
 
     def model_trained_criterion(self):
@@ -128,7 +131,220 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
             return True
         else:
             return False
+
+
+    def validate_model(self, accelerator, model, val_dataloader, device = "cpu"):
+
+        val_metrics = defaultdict(list)
+        model.eval()
+        with torch.inference_mode(True):
+            for data in val_dataloader:
+                data = data.to(device)
+                # Generate random diffusion timesteps
+                timesteps = self.generate_random_timesteps(num_steps = self.diffusion_steps,
+                                                            size = (data.num_graphs, 1), 
+                                                            device = device,
+                                                            weights = None
+                                                            )
+                        # accelerator.print("Timesteps.shape: ", timesteps.shape             
+                timesteps = timesteps.repeat_interleave(repeats = data.num_nodes // data.num_graphs, dim = 0)
+                assert timesteps.shape[0] == data.y.shape[0], f"Shape mismatch: {timesteps.shape[0]} != {data.y.shape[0]}"
+
+                # Add random noise to clean samples
+                y_0 = data.y.clone()
+                noisy_y_t, eps = self.noise(y_0, timesteps)
+
+                # Predict noise
+                pred_noise = model(noisy_y_t, timesteps, data)
+
+                loss = self.loss_fn(pred_noise, eps).mean()
+
+                val_metrics["loss"].append(loss)
+
+                # Compute validation metrics
+                # ...
+
+        val_metrics["loss"] = sum(val_metrics["loss"]) / len(val_metrics["loss"]) if val_metrics["loss"] else 0.0
+
+        return val_metrics
+
+
+    def batch_from_data_list(self, data_list, exclude_keys, remap_keys=None, batch_size=None):
+        data_batch = Batch.from_data_list(data_list = data_list,
+                                          follow_batch=['y'],
+                                          exclude_keys=exclude_keys
+                                          )
+
+        for key in data_batch.keys():
+            if key in ["Features", "Target"]:
+                if data_batch[key] is not None and isinstance(data_batch[key][0], list):
+                    # Concatenate lists of strings
+                    data_batch[key] = sum(data_batch[key], []) 
+
+        return data_batch
+
+
+    def accelerated_sample_ddpm(self, model, data, nsamples = 100, device = "cpu"):
+
+        """Sampler following the Denoising Diffusion Probabilistic Models method by Ho et al (Algorithm 2)""" 
+
+        data_batch = self.batch_from_data_list(data_list = [data.clone() for _ in range(nsamples)],
+                                               exclude_keys = None)
+        
+        print(f"Data: ", data, "\tData_batch: ", data_batch)
+
+        try:
+            y_batch_debug_idx = torch.arange(0, len(data_batch.y_batch), step = (len(data.ptr) - 1) // 2).to(data_batch.y_batch.device)
+            print("Data_batch.y_batch[debug_idx]: ", torch.stack((y_batch_debug_idx, data_batch.y_batch[y_batch_debug_idx]), dim = 1))
+        except Exception as e:
+            print("Error occurred while stacking tensors: ", e)
+
+        data_batch = data_batch.to(device)
+
+        # data = data.to(device)
+        model.eval()
+        with torch.inference_mode(True):
+            # if isinstance(data.y, torch.Tensor):
+            sample_size = (data_batch.y.shape[0], *data_batch.y.shape[1:])
+            # else:
+            #     sample_size = (nsamples, *data.y[0].shape)
+
+            y = self.sample_prior(sample_size=sample_size).to(device) # [n_samples, n_features]
+
+            print(f"y_T.shape: {y.shape}.")
+
+            # xt = [x.cpu()]
+            yt = [y.clone()]
+            scoret = []
+
+            for t in tqdm(range(self.diffusion_steps-1, 0, -1)):
+
+                predicted_noise = model(y, torch.full([y.shape[0], 1], t).to(device), data_batch)
+
+                # See DDPM paper between equations 11 and 12
+                y = 1 / (self.alphas[t] ** 0.5) * (y - (1 - self.alphas[t]) / ((1-self.baralphas[t]) ** 0.5) * predicted_noise)
+                if t > 1:
+                    # See DDPM paper section 3.2.
+                    # Choosing the variance through beta_t is optimal for x_0 a normal distribution
+                    variance = self.betas[t]
+                    std = variance ** (0.5)
+                    y += std * self.sample_prior(sample_size=y.shape).to(device)
+                # xt += [x.cpu()]
+                yt += [y.clone()]
+
+                score, _ = self.score_fnc_to_noise_pred(timestep=t, score = None, noise_pred=predicted_noise)
+                # scoret += [score.cpu()]
+                scoret += [score.clone()]
+
+
+        return y, {'x_t': yt,
+                    'score_t': scoret,
+                    'data_batch': data_batch.cpu() # move data_batch to cpu
+                    }
     
+
+
+    def accelerated_sample(self, model, data, sampler = "ddpm", nsamples = 100, device = "cpu", *kwargs):
+
+        if sampler == 'ddpm':
+            return self.accelerated_sample_ddpm(model, data, nsamples = nsamples, device = device)
+        elif sampler == 'ddpm_x0':
+            return self.accelerated_sample_ddpm_x0(model, data, nsamples = nsamples, device = device)
+        elif sampler == 'ddim':
+            return self.accelerated_sample_ddim(model, data, nsamples = nsamples, device = device, eta=kwargs.get('eta', 0.2))
+        else:
+            raise ValueError(f"Sampler {sampler} is not implemented.")
+    
+
+
+    def eval(self, accelerator, model: torch.nn.Module, data: Data, nsamples = 100, device = "cpu", sampler = "ddpm") -> defaultdict:
+        
+        eval_metrics = {}
+        
+        model = model.to(device)
+        model.eval()
+        data = data.to(device)
+
+        num_timestamps = len(data.ptr) - 1
+        num_stocks = data.x.shape[0] // num_timestamps
+        num_features, past_window = data.x.shape[1], data.x.shape[2]  # num_features, past_window
+
+        target = data.y.reshape(len(data.ptr) - 1, num_stocks, -1) # num_timestamps, num_stocks, future_window
+
+        ygen, ygen_hist = self.accelerated_sample(model = model, data=data, sampler=sampler, nsamples=nsamples, device=device)
+
+        timestamps_gen = ygen_hist["data_batch"].timestamp.to(device)
+        y_batch_gen = ygen_hist["data_batch"].y_batch.to(device)
+        batch_gen = ygen_hist["data_batch"].batch.to(device)
+        stocks_index_gen = ygen_hist["data_batch"].stocks_index.to(device)
+
+        accelerator.print(f"[Timestamps, y_batch, batch_gen] in the generated batch [::(len(data.ptr) - 1) // 20]: {torch.stack([timestamps_gen[::(len(data.ptr) - 1) // 20], y_batch_gen[::(len(data.ptr) - 1) // 20], batch_gen[::(len(data.ptr) - 1) // 20]], dim = -1)}")
+        accelerator.print(f"Stocks_index in the generated batch [::(len(data.ptr) - 1) // 20]: {stocks_index_gen[::num_stocks // 5]}")
+
+        preds = ygen.reshape(-1, num_stocks, *target.shape[2:]) # [num_timestamps * nsamples, num_stocks, future_window]    
+        
+        preds_stocks_index = stocks_index_gen.reshape(-1, num_stocks, 
+                                                    #   *target.shape[2:-1],
+                                                        1) # [num_timestamps * nsamples, num_stocks, 1]
+        assert torch.all(preds_stocks_index[:, 0] == 0), "Stocks index should be 0 for all samples."
+        assert torch.all(preds_stocks_index[:, 2] == 2), "Stocks index should be 2 for all samples."
+        assert torch.all(preds_stocks_index[:, -1] == num_stocks - 1), f"Stocks index should be {num_stocks - 1} for all samples."
+
+        # Split ygen into nsamples chunks and stack them across the last dimension
+        preds = torch.stack(torch.chunk(preds, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, future_window, nsamples]
+
+        preds_timestamps = timestamps_gen.reshape(-1, num_stocks, 
+                                                 #   *target.shape[2:-1],
+                                                    1) # [num_timestamps * nsamples, num_stocks, 1]
+        preds_timestamps = torch.stack(torch.chunk(preds_timestamps, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, 1, nsamples]
+        assert torch.all(preds_timestamps[0] == preds_timestamps[0, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[0, 0, 0, 0]} for all samples but it is {preds_timestamps[0]}."
+        assert torch.all(preds_timestamps[2] == preds_timestamps[2, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[2, 0, 0, 0]} for all samples but it is {preds_timestamps[2]}."
+        assert torch.all(preds_timestamps[-1] == preds_timestamps[-1, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[-1, 0, 0, 0]} for all samples but it is {preds_timestamps[-1]}."
+
+        assert torch.all(preds_timestamps[3, 0] == preds_timestamps[3, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 0, 0, 0]} for all samples but it is {preds_timestamps[3, 0]}."
+        assert torch.all(preds_timestamps[3, 2] == preds_timestamps[3, 2, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 2, 0, 0]} for all samples but it is {preds_timestamps[3, 2]}."
+        assert torch.all(preds_timestamps[3, -1] == preds_timestamps[3, -1, 0, 0]), f"Timestamps index should be {preds_timestamps[3, -1, 0, 0]} for all samples but it is {preds_timestamps[3, -1]}."
+
+        target.unsqueeze_(-1) # [num_timestamps, num_stocks, future_window, 1]
+        assert preds.shape[:3] == target.shape[:3], f"Shape mismatch: {preds.shape} != {target.shape}"
+
+
+        plot_stocks_idx = np.random.choice(num_stocks, size = 4, replace = False)
+
+        eval_metrics.update(get_regression_errors(preds, target))
+        eval_metrics.update(log_plot_regression_errors(preds, target,
+                                                       metric = data.info["Target"] if isinstance(data.info["Target"], str) else data.info["Target"][0],
+                                                       stocks_idx=plot_stocks_idx)
+                                                       )
+
+        # Pred and target are DailyLogReturns, map them to log returns
+        pred_log_returns = daily_log_returns_to_log_returns(preds)
+        target_log_returns = daily_log_returns_to_log_returns(target)
+        eval_metrics.update(log_plot_regression_errors(pred_log_returns, target_log_returns, metric = "Log returns", stocks_idx=plot_stocks_idx))
+
+        features_info = data.info['Features']
+        if isinstance(features_info, list) and isinstance(features_info[0], list):
+            features_info = features_info[0]
+            if 'Close' in features_info:
+                closing_prices_col_idx = features_info.index('Close')
+            else:
+                closing_prices_col_idx = 0
+
+        # init_closing_prices = data.close_price_y.reshape(num_timestamps, num_stocks, -1)[:, :, 0] # [num_timestamps, num_stocks]
+        init_closing_prices = data.x[:, closing_prices_col_idx, -1]
+
+        accelerator.print(f"Init closing prices: ", init_closing_prices)
+        init_closing_prices = init_closing_prices.reshape(num_timestamps, num_stocks).unsqueeze(-1).unsqueeze(-1) # [num_timestamps, num_stocks, 1, 1]
+        pred_closing_prices = daily_log_returns_to_closing_prices(preds, init_closing_prices = init_closing_prices)
+        target_closing_prices = daily_log_returns_to_closing_prices(target, init_closing_prices = init_closing_prices)
+
+        eval_metrics.update(log_plot_regression_errors(pred_closing_prices, target_closing_prices, metric = "Closing prices", stocks_idx=plot_stocks_idx))
+
+        return eval_metrics
+
+
+
+
 
     def train(self, accelerator, model, dataloader, optimizer, lr_sched, n_epochs = [100], device = 'cpu', log_dict = {}, **kwargs):   
 
@@ -213,24 +429,10 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
                             # Predict the added noise (conditioning info is in the data object)
                             pred_noise = model(noisy_y_t, timesteps, data)
-                            if isinstance(pred_noise, tuple):
-                                for i in range(len(pred_noise), 0, -1):
-                                    if i == 3:
-                                        model_debug_data = pred_noise[i-1]
-                                    elif i == 2:
-                                        attn_weights = pred_noise[i-1]
-                                    elif i == 1:
-                                        pred_noise = pred_noise[i-1]
-                                    else:
-                                        pass
-                            else:
-                                attn_weights = None
-                                model_debug_data = None
 
                             # Compute the diffusion loss
                             all_loss_terms = self.loss_fn(pred_noise, eps).mean(dim = -1)
                             loss = all_loss_terms.mean()
-
 
                         if phase == 'train':
                             optimizer.zero_grad()
@@ -270,8 +472,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                     if batch_idx >= 0:
                         # We want to process single batch per epoch
                         break
-
-                
+             
                 epoch_loss /= num_batches
                 epoch_pgrad_norm /= num_batches
 
@@ -287,6 +488,33 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                             "train-step": epoch,
                             # "DualSampler-Training/buffer-replacement-percentage": 100 * (self.lambdas_buffer.buffer_adds / self.lambdas_buffer.buffer_size - 1),
                             })
+                
+                if phase == "train" and eval_criterion(epoch=epoch, loss=epoch_loss):
+                    accelerator.print(f"Validation criteria met at epoch {epoch}, loss {epoch_loss}")
+                    val_metrics = self.validate_model(accelerator = accelerator,
+                                                        model = model,
+                                                        val_dataloader = dataloader['val'],
+                                                        device = device
+                                                        )
+                    log_dict.update({f"{self.__class__.__name__}-Evaluation/val-{k}": v for k, v in val_metrics.items()})
+
+
+                    # Sample from the trained model and regress
+
+                    for eval_phase in ["train-val", "val"]:
+                        nsamples = 10
+                        eval_metrics = self.eval(accelerator=accelerator, model = model, data = next(iter(dataloader[eval_phase])), nsamples = nsamples, device = device, sampler = "ddpm")
+                        log_dict.update({f"{self.__class__.__name__}-Evaluation/{eval_phase}-{k}": v for k, v in eval_metrics.items()})
+
+                    chkpt_step += 1
+
+
+                elif not eval_criterion(epoch=epoch, loss=epoch_loss) and phase == "train":
+                    accelerator.print(f"Validation criteria not met at epoch {epoch}, for loss {epoch_loss}. Skipping validation...")
+
+                else:
+                    pass
+                    
 
         self.global_chkpt_step = chkpt_step
         return model, optimizer, lr_sched, log_dict
@@ -755,7 +983,7 @@ class StockPriceForecastDiffusionLearnerWrapper(abc.ABC):
         self.cd_learner = StockPriceForecastDiffusionLearner(config = diffusion_config, device = device)
 
 
-    def train_chkpt_criterion(self, epoch, total_num_epochs):
+    def train_chkpt_criterion(self, epoch, total_num_epochs, freq = 1/20):
         """
         Define the criterion for saving the training checkpoint.
         This can be customized based on the training requirements.
@@ -763,7 +991,7 @@ class StockPriceForecastDiffusionLearnerWrapper(abc.ABC):
         # # Example criterion: save every 5 epochs after 80% of the total epochs
         # if epoch % 20 == 0 and epoch > 0.8 * total_num_epochs:
         #     return True
-        if self.cd_learner.global_chkpt_step >= 1 and (epoch + 1) % (total_num_epochs // 100) == 0:
+        if self.cd_learner.global_chkpt_step >= 1 and (epoch + 1) % (total_num_epochs * freq) == 0:
             return True
         
         return False
@@ -885,20 +1113,20 @@ class StockPriceForecastDiffusionLearnerWrapper(abc.ABC):
             # self.log(accelerator, log_dict)
 
 
-            # if save_train_chkpt_path is not None and self.train_chkpt_criterion(epoch=epoch, total_num_epochs=n_epochs[-1]):
-            #     # Save the state-augmented model checkpoint every 5 epochs after 80% of the training.
+            if save_train_chkpt_path is not None and self.train_chkpt_criterion(epoch=epoch, total_num_epochs=n_epochs[-1]):
+                # Save the CD model checkpoint every 1/100th of total training epochs.
                     
-            #     accelerator.print(f"Saving the cd model weights to path {save_train_chkpt_path}.")
+                accelerator.print(f"Saving the cd model weights to path {save_train_chkpt_path}.")
 
-            #     os.makedirs(save_train_chkpt_path, exist_ok=True)
+                os.makedirs(save_train_chkpt_path, exist_ok=True)
 
-            #     save_cd_train_chkpt(save_path=save_train_chkpt_path,
-            #                         model=accelerator.unwrap_model(cd_model),
-            #                         optimizer=accelerator.unwrap_model(cd_optimizer),
-            #                         lr_sched=accelerator.unwrap_model(cd_lr_sched),
-            #                         epoch=epoch,
-            #                         global_chkpt_step=self.cd_learner.global_chkpt_step,
-            #     )
+                save_cd_train_chkpt(save_path=save_train_chkpt_path,
+                                    model=accelerator.unwrap_model(cd_model),
+                                    optimizer=accelerator.unwrap_model(cd_optimizer),
+                                    lr_sched=accelerator.unwrap_model(cd_lr_sched),
+                                    epoch=epoch,
+                                    global_chkpt_step=self.cd_learner.global_chkpt_step,
+                )
 
                 
             #     if sa_model is not None:

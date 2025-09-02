@@ -1,13 +1,24 @@
+import io
+import numpy as np
 import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import wandb
+from PIL import Image
 from models.StockForecastGNN import StockForecastDiffusionGNN
+from utils.plot_utils import plot_regression_errors
 
 
-def get_diffusion_model_architecture(args, n_features, num_nodes, diffusion_steps):
-    print(f"Creating diffusion model with architecture: {args.gnn_backbone}, n_features = {n_features}, num_nodes = {num_nodes}, diffusion_steps = {diffusion_steps}")
+def get_diffusion_model_architecture(args, n_features_in, n_features_out, num_nodes, diffusion_steps,
+                                     timesteps_cond = None,
+                                     n_features_cond = None
+                                     ):
+    print(f"Creating diffusion model with architecture: {args.gnn_backbone}, n_features_in = {n_features_in}, n_features_out = {n_features_out}, num_nodes = {num_nodes}, diffusion_steps = {diffusion_steps}")
 
-        
     if args.gnn_backbone == 'resplus-gnn':
-        model = StockForecastDiffusionGNN(nfeatures=n_features, nunits=args.hidden_dim, nblocks=args.n_layers, nsteps = diffusion_steps,
+        model = StockForecastDiffusionGNN(nfeatures=n_features_in, nunits=args.hidden_dim, nblocks=args.n_layers, nsteps = diffusion_steps,
+                                          num_features_cond=n_features_cond,
+                                          num_timesteps_cond=timesteps_cond,
                              norm = args.norm_layer, conv_layer_normalize = args.conv_layer_normalize, k_hops = args.k_hops,
                              use_res_connection_time_embed = args.use_res_connection_time_embed,
                              dropout_rate = args.dropout_rate,
@@ -30,19 +41,22 @@ def get_diffusion_model_architecture(args, n_features, num_nodes, diffusion_step
 
     
 
-def create_cd_model(accelerator, args, n_features = 1, diffusion_steps = 100, device = 'cpu', num_nodes = 100):
+def create_cd_model(accelerator, args,
+                    diffusion_steps = 100,
+                    n_features_in = 1, n_features_out = 1, n_features_cond = None,
+                    timesteps_cond = None,
+                    device = 'cpu', num_nodes = 100):
     '''
     Create and initialize the (conditional) diffusion model.
     '''
-    # from utils.model_utils import PrimalGNN
 
-    # model = PrimalGNN(conv_model=args.model, P_max=0.01, num_features_list=[n_features] + args.num_features_list, k_hops = args.k_hops, batch_norm = args.batch_norm, dropout_rate = args.dropout_rate)
-    
-    # model = DiffusionGNN(nfeatures=n_features, nunits=128, nblocks = 4, nsteps=diffusion_steps, nsubblocks=3)
+    model = get_diffusion_model_architecture(args,
+                                             n_features_in=n_features_in,
+                                             n_features_out=n_features_out,
+                                             n_features_cond=n_features_cond,
+                                             timesteps_cond=timesteps_cond,
+                                             num_nodes=num_nodes, diffusion_steps=diffusion_steps)
 
-
-    model = get_diffusion_model_architecture(args, n_features=n_features, num_nodes=num_nodes, diffusion_steps=diffusion_steps)
-    
     is_trained = False
     # device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     device = accelerator.device
@@ -71,3 +85,31 @@ def create_cd_model(accelerator, args, n_features = 1, diffusion_steps = 100, de
             accelerator.print(f'Loading model state dict from path {args.load_model_chkpt_path} failed.\nDefault weight initialization is applied.')
 
     return model, is_trained
+
+
+
+
+def get_regression_errors(preds, target):
+
+    mse = F.mse_loss(preds, target).item()
+    rmse = F.mse_loss(preds, target).sqrt().item()
+    mae = F.l1_loss(preds, target).item()
+    mre = (F.l1_loss(preds, target) / target.abs().mean()).item()
+
+    return {"mse": mse, "rmse": rmse, "mae": mae, "mre": mre}
+
+
+
+def log_plot_regression_errors(preds, target, metric, stocks_idx = None):
+
+    fig, _ = plot_regression_errors(preds, target, metric=metric, stocks_idx=stocks_idx, fig = None, axs = None)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format = "png")
+    buf.seek(0)
+    plt.close(fig)
+
+    log_key = f"regression-plot-{metric}"
+    log_item = wandb.Image(Image.open(buf))
+
+    return {log_key: log_item}

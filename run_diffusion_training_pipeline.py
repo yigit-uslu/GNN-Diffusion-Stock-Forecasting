@@ -22,7 +22,7 @@ def run_diffusion_training(args, arg_groups, accelerator,
     
 
     device = accelerator.device
-    
+
 
     ### Create dataloaders ###
     cd_dataloaders = run_create_pyg_dataloaders_pipeline(args=args,
@@ -46,7 +46,9 @@ def run_diffusion_training(args, arg_groups, accelerator,
     # Create and train a diffusion model policy to forecast stock prices
     cd_model, is_cd_model_trained = create_cd_model(accelerator=accelerator,
                                                     args=arg_groups['CD-model'],
-                                                    n_features=dataset.future_window,
+                                                    n_features_in=dataset.future_window,
+                                                    n_features_out=dataset.future_window,
+                                                    n_features_cond=len(dataset.info["Features"]), timesteps_cond=dataset.past_window,
                                                     diffusion_steps=arg_groups['CD-train-algo'].diffusion_steps,
                                                     device=device,
                                                     num_nodes=dataset.info["Num_nodes"]

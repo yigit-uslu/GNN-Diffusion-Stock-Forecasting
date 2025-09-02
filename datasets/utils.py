@@ -3,7 +3,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-
 def get_graph_in_pyg_format(values_path: str, adj_path: str,
 							target_column_name: str = "NormClose") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
 	"""
@@ -45,6 +44,20 @@ def get_graph_in_pyg_format(values_path: str, adj_path: str,
 
 	return x, close_prices, edge_index, edge_weight, info_dict
 
+
+
+def daily_log_returns_to_log_returns(daily_log_returns: torch.Tensor, time_dim: int = 0) -> torch.Tensor:
+	"""
+	Maps daily log returns back to cumulative log returns.
+	"""
+	return daily_log_returns.cumsum(dim=time_dim)
+
+
+def daily_log_returns_to_closing_prices(log_returns: torch.Tensor, init_closing_prices: torch.Tensor, time_dim: int = 0) -> torch.Tensor:
+	"""
+	Maps daily log returns back to closing prices.
+	"""
+	return daily_log_returns_to_log_returns(log_returns, time_dim).exp() * init_closing_prices
 
 
 def get_column_names(values_path_or_df: Union[str, pd.DataFrame]) -> list[str]:

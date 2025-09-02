@@ -22,15 +22,23 @@ def create_dataloaders(args, arg_groups, accelerator, dataset) -> Union[DataLoad
     train_dataset, val_dataset, test_dataset = dataset[:int(len(dataset) * train_part)], \
         dataset[int(len(dataset) * train_part):int(len(dataset) * (train_part + val_part))], \
             dataset[int(len(dataset) * (train_part + val_part)):]
+    
+
+    train_val_dataset = dataset[:int(len(dataset) * val_part)]
 
     accelerator.print(f"Train dataset: {len(train_dataset)} / {len(dataset)} samples.")
     accelerator.print(f"Validation dataset: {len(val_dataset)} / {len(dataset)} samples.")
     accelerator.print(f"Test dataset: {len(test_dataset)} / {len(dataset)} samples.")
 
     dataloaders = {
-        "train": DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True),
-        "val": DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False, pin_memory=True, drop_last=True),
-        "test": DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, pin_memory=True, drop_last=True)
+        "train": DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True,
+                            follow_batch=["y"]),
+        "train-val": DataLoader(train_val_dataset, batch_size=len(train_val_dataset), shuffle=False, pin_memory=True, drop_last=True,
+                                follow_batch=["y"]),
+        "val": DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False, pin_memory=True, drop_last=True,
+                          follow_batch=["y"]),
+        "test": DataLoader(test_dataset, batch_size=len(test_dataset), shuffle=False, pin_memory=True, drop_last=True,
+                           follow_batch=["y"])
     }
 
     return dataloaders

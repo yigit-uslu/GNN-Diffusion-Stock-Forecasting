@@ -47,7 +47,7 @@ def plot_batched_data(data: Data,
     print(f"Past window size in x: {past_window}")
 
     if stocks_idx is None:
-        stocks_idx = np.random.choice(num_stocks, 4)
+        stocks_idx = np.random.choice(num_stocks, 4, replace = False)
 
     if plot_target == "Closing_Price":
         target = data.close_price.reshape(num_timestamps, num_stocks, -1)
@@ -82,7 +82,6 @@ def plot_batched_data(data: Data,
     print("Target.shape: ", target.shape)
 
 
-
     if save_dir is not None:
         with sns.axes_style("darkgrid"):
             fig, axs = plt.subplots(2, 2, figsize=(15, 10))
@@ -98,6 +97,42 @@ def plot_batched_data(data: Data,
             os.makedirs(save_dir, exist_ok=True)
             plt.savefig(f"{save_dir}/batched_data_{plot_target}" + save_ext, dpi=300, bbox_inches='tight')
             plt.close(fig)
+
+
+
+
+def plot_regression_errors(preds, target, metric, stocks_idx = None, fig = None, axs = None):
+    """
+    Plot regression errors for the specified stocks.
+    Input:
+    - preds: Tensor of shape [num_timestamps, num_stocks, future_window, nsamples]
+    - target: Tensor of shape [num_timestamps, num_stocks, future_window, 1]
+    - metric: str 
+    """
+    print("Plotting regression errors...")
+    print(f"preds.shape: {preds.shape}\tTarget.shape: {target.shape}.")
+
+    if stocks_idx is None:
+        stocks_idx = np.random.choice(preds.shape[1], 4, replace = False) # 4 random stocks
+
+    with sns.axes_style("darkgrid"):
+        if fig is None or axs is None:
+            fig, axs = plt.subplots(nrows = int(np.ceil(len(stocks_idx) / 2)), ncols = 2, figsize = (15, 10))
+
+        assert len(stocks_idx) <= len(axs.flatten()), "Number of stocks to plot exceeds number of subplots available."
+
+        for idx, stock_idx in enumerate(stocks_idx):
+            ax = axs[idx // 2, idx % 2]
+            ax.plot(preds[:, stock_idx, 0].detach().cpu().numpy(), linestyle = '--', label="Predictions" if preds.shape[-1] == 1 else None)
+            ax.plot(target[:, stock_idx, 0].detach().cpu().numpy(), marker = 'd', markersize = 4, markevery = 10, label="Target")
+            ax.set_title(f"{metric} of Stock {stock_idx}")
+            ax.set_xlabel("Timestamp (Date)")
+            ax.set_ylabel(metric)
+            ax.grid(True)
+            ax.legend()
+
+    return fig, axs
+
 
 
 def create_repeating_colormap(n_points, n_distinct_colors=10):

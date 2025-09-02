@@ -177,6 +177,7 @@ class ResidualGNN(nn.Module):
         self.dropout_rate = kwargs.get("dropout_rate", 0.0)
         self.res_connection = kwargs.get("res_connection", "res+")
         self.use_res_connection_time_embed = kwargs.get("use_res_connection_time_embed", False)
+        self.time_embed_strategy = kwargs.get("time_embed_strategy", "add")
         self.use_checkpointing = kwargs.get("use_checkpointing", False)
 
         self.activation = nn.LeakyReLU(inplace=True)
@@ -267,8 +268,16 @@ class ResidualGNN(nn.Module):
         spectral_laplacian_weight = identity_weight - normalized_weight  # L = I - A_norm
 
         return spectral_laplacian_weight
+    
 
-
+    def add_or_multiply_time_embeddings(self, x, t_embed):
+        if self.time_embed_strategy == "add":
+            return x + t_embed
+        elif self.time_embed_strategy == "multiply":
+            return x * t_embed
+        else:
+            raise NotImplementedError(f"Unknown time embedding strategy: {self.time_embed_strategy}")
+        
 
     def forward(self, x, edge_index, edge_weight=None, batch=None, t=None, return_attn_weights=False, debug_forward_pass=False):
 
@@ -294,7 +303,8 @@ class ResidualGNN(nn.Module):
             t = self.time_embed(t)
             assert x.size(1) == t.size(1), f"Hidden channels mismatch. {x.size(1)}-{t.size(1)}" 
 
-            x = x + t # add time embeddings only at the input layer
+            # x = x + t # add time embeddings only at the input layer
+            x = self.add_or_multiply_time_embeddings(x, t)
         
         
         ### Start with single convolution layer similar to DeepGCN architecture ###
@@ -326,7 +336,8 @@ class ResidualGNN(nn.Module):
                 print("Using residual connections for time embedddings.") if self.n_iters_trained == 0 else None
                 assert t is not None, "Time embeddings are required for residual time connection."
                 assert x.size(1) == t.size(1), f"Hidden channels mismatch. {x.size(1)}-{t.size(1)}"
-                x = x + t # add time embeddings to the output of each layer
+
+                x = self.add_or_multiply_time_embeddings(x, t)
 
             if debug_forward_pass and norms is not None:
                 # Compute individual layer statistics and label them by layer_id.
@@ -358,7 +369,7 @@ class ResidualGNN(nn.Module):
         else:
             debug_data = None
 
-        print(f"Pred_noise.shape: {out.shape}")
+        # print(f"Pred_noise.shape: {out.shape}")
 
         self.n_iters_trained += 1
         return out, attn_weights, debug_data
@@ -382,3 +393,145 @@ class ResidualGNN(nn.Module):
             torch.nn.init.xavier_uniform_(m.weight)  # Xavier init for final layers
             if m.bias is not None:
                 torch.nn.init.zeros_(m.bias)
+
+
+
+
+
+
+class ResidualGNNwithConditionalEmbeddings(ResidualGNN):
+    def __init__(self, in_channels, hidden_channels, out_channels, depth, norm, cond_in_channels, **kwargs):
+        super(ResidualGNNwithConditionalEmbeddings, self).__init__(in_channels=in_channels,
+                                                                  hidden_channels=hidden_channels,
+                                                                  out_channels=out_channels,
+                                                                  depth=depth,
+                                                                  norm=norm,
+                                                                  **kwargs)
+        self.cond_in_channels = cond_in_channels
+
+        self.cond_embedding_layer = nn.Sequential(
+            nn.Linear(cond_in_channels, hidden_channels),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_channels, hidden_channels)
+        )
+
+        self.cond_embed_strategy = kwargs.get("cond_embed_strategy", "multiply") # "add" or "multiply"
+
+
+    def add_or_multiply_cond_embeddings(self, x, cond_embed):
+        if self.cond_embed_strategy == "add":
+            return x + cond_embed
+        elif self.cond_embed_strategy == "multiply":
+            return x * cond_embed
+        else:
+            raise NotImplementedError(f"Unknown conditional embedding strategy: {self.cond_embed_strategy}")
+
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor = None, t: torch.Tensor = None, edge_index = None, edge_weight = None, batch=None,
+                return_attn_weights=False, debug_forward_pass=False):
+
+        if self.conv_layer_normalize:
+            try:
+                add_self_loops = True
+                improved = add_self_loops
+                edge_index, edge_weight = gcn_norm(  # yapf: disable
+                        edge_index, edge_weight, x.size(0),
+                        improved=improved, add_self_loops=add_self_loops, # flow=self.conv_layers[0].flow,
+                        dtype=x.dtype)
+                print("GCN normalization applied to edge_weights.") if self.n_iters_trained == 0 else None
+
+            except:
+                print("GCN normalization failed.") if self.n_iters_trained == 0 else None
+
+        all_norms = []
+
+        x = self.x_embed(x)
+
+        if t is not None:
+            assert x.size(0) == t.size(0), f"Batch size mismatch. {x.size(0)}-{t.size(0)}"
+            t = self.time_embed(t)
+            assert x.size(1) == t.size(1), f"Hidden channels mismatch. {x.size(1)}-{t.size(1)}" 
+
+            x = self.add_or_multiply_time_embeddings(x, t)
+
+
+        if cond is not None:
+            print("Adding or multiplying conditional embeddings.") if self.n_iters_trained == 0 else None
+            assert cond.size(0) == x.size(0), f"Batch size mismatch. {cond.size(0)}-{x.size(0)}"
+            cond_embed = self.cond_embedding_layer(cond)
+            assert x.size(1) == cond_embed.size(1), f"Hidden channels mismatch. {x.size(1)}-{cond_embed.size(1)}"
+
+            x = self.add_or_multiply_cond_embeddings(x, cond_embed)
+
+        ### Start with single convolution layer similar to DeepGCN architecture ###
+        # x, norms = self.res_conv_layers[0](x, edge_index=edge_index, edge_weight=edge_weight, batch=batch)
+        x = self.res_conv_layers[0].conv(x, edge_index=edge_index, edge_weight=edge_weight)
+        norms = [{"layer": "C", "norm": torch.linalg.vector_norm(x, ord = 2, dim = 1).mean().item()},
+                 {"layer": "C-var", "norm": torch.linalg.vector_norm(x, ord = 2, dim = 1).var().item()}] if self.res_conv_layers[0].return_norms else None
+        ### Start with single convolution layer similar to DeepGCN architecture ###
+
+        if debug_forward_pass and norms is not None:
+            # Compute individual layer statistics and label them by layer_id.
+            for norm in norms:
+                norm["layer"] = f"0{norm['layer']}"
+            all_norms += norms
+
+        for layer_id, conv_layer in enumerate(self.res_conv_layers[1:], start = 1):
+            
+            # if layer_id == 0:
+            #     x = x_embed_layer(x)
+            #     t = t_embed_layer(t)
+            #     assert x.size(1) == t.size(1), f"Hidden channels mismatch. {x.size(1)}-{t.size(1)}" 
+            # # assert t.size(1) == self.hidden_channels, f"Hidden channels mismatch. {t.size(1)}-{self.hidden_channels}"
+
+            # x = x + (layer_id == 0) * t # add time embeddings only to the input layer
+
+            x, norms = conv_layer(x, edge_index=edge_index, edge_weight=edge_weight, batch=batch)
+
+            if self.use_res_connection_time_embed:
+                print("Using residual connections for time embeddings.") if self.n_iters_trained == 0 else None
+                assert t is not None, "Time embeddings are required for residual time connection."
+                assert x.size(1) == t.size(1), f"Hidden channels mismatch. {x.size(1)}-{t.size(1)}"
+                x = x + t # add time embeddings to the output of each layer
+                x = self.add_or_multiply_time_embeddings(x, t)
+
+                # We use residual connections for cond embeddings if residual time embeddings are also utilized.
+                print("Using residual connections also for cond embeddings.") if self.n_iters_trained == 0 else None
+                assert cond_embed is not None, "Conditional embeddings are required for residual cond connection."
+                assert x.size(1) == cond_embed.size(1), f"Hidden channels mismatch. {x.size(1)}-{cond_embed.size(1)}"
+                x = self.add_or_multiply_cond_embeddings(x, cond_embed)
+
+            if debug_forward_pass and norms is not None:
+                # Compute individual layer statistics and label them by layer_id.
+                for norm in norms:
+                    norm["layer"] = f"{layer_id}{norm['layer']}"
+                all_norms += norms
+
+        ### New part to the forward pass ###
+        x = self.res_conv_layers[0].act(self.res_conv_layers[0].norm(x, batch = batch, batch_size = None))
+        ### New part to the forward pass ###
+        
+        out = self.out_layers(x)
+
+        if debug_forward_pass:
+            all_norms += [{"layer": "-1", "norm": torch.linalg.vector_norm(out, ord = 2, dim = 1).mean().item()},
+                    {"layer": "-1-var", "norm": torch.linalg.vector_norm(out, ord = 2, dim = 1).var().item()}]
+
+        attn_weights = None
+
+        if debug_forward_pass:
+            debug_data = {
+                        #   'edge_indices': [e.detach().cpu() for e in edge_indices],
+                          'edge_indices': [edge_index.detach().cpu()],
+                        #   'edge_weights': [w.detach().cpu() for w in edge_weights],
+                          'edge_weights': [edge_weight.detach().cpu()],
+                          'batches': [batch.detach().cpu()],
+                          'model_layer_norms': all_norms
+                          }
+        else:
+            debug_data = None
+
+        # print(f"Pred_noise.shape: {out.shape}")
+
+        self.n_iters_trained += 1
+        return out, attn_weights, debug_data

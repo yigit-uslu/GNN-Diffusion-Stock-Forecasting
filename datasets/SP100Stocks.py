@@ -9,20 +9,44 @@ from datasets.utils import get_graph_in_pyg_format, get_column_idx
 
 
 class StocksDataDiffusion(Data):
-	def __init__(self, x, edge_index, edge_weight, close_price, y, close_price_y, timestamp):
-		super().__init__(x=x, edge_index=edge_index, edge_weight=edge_weight, close_price=close_price, y=y, close_price_y=close_price_y, timestamp=timestamp)
-		
+	def __init__(self, x, edge_index, edge_weight, close_price, y, close_price_y, timestamp, stocks_index, info = None):
+		super().__init__(x=x, edge_index=edge_index, edge_weight=edge_weight, close_price=close_price, y=y, close_price_y=close_price_y, timestamp=timestamp, stocks_index=stocks_index)
+		if info is not None:
+			self.info = info
+			# for key in info:
+			# 	setattr(self, key, info[key])
+			# self.info = info
 
 	def __inc__(self, key, value, *args, **kwargs):
-		if key == "timestamp":
+		if key in ["timestamp", "stocks_index"]:
 			return 0
+		
+		if key == "info":
+			return 0
+		# Don't increment any info-related attributes
+		# if key in ["Target", "Features", "Num_nodes"]:
+		# 	return 0
 		return super().__inc__(key, value, *args, **kwargs)
+
 
 	def __cat_dim__(self, key, value, *args, **kwargs):
 		# Default behavior for specific keys
-		if key in ['adj']:
-			return 1 # concatenate along the node dimension
+		# if key in ['adj']:
+		# 	return 1 # concatenate along the node dimension
 
+		if key in ["timestamp", "stocks_index"]:
+			return 0  # Batch timestamps and stocks_index
+		
+		# Don't batch info dictionary or any of its keys
+		if key == "info":
+			return None
+		
+		if key in ["Features", "Target"]:
+			return 0
+
+		# if key in self.info:
+		# 	return None  # Don't batch - keeps only first occurrence
+		
 		return super().__cat_dim__(key, value, *args, **kwargs)
 
 	
@@ -80,7 +104,9 @@ class SP100Stocks(Dataset):
 				close_price=close_prices[:, idx:idx + self.past_window],
 				y=x[:, target_column_idx, idx + self.past_window:idx + self.past_window + self.future_window],
 				close_price_y=close_prices[:, idx + self.past_window:idx + self.past_window + self.future_window],
-				timestamp=idx
+				stocks_index=torch.arange(x.shape[0]),
+				timestamp=torch.LongTensor([idx]).repeat(x.shape[0]), # Repeat for each node in the batch
+				info=info_dict
 			) for idx in range(x.shape[2] - self.past_window - self.future_window)
 		]
 		for t, timestep in enumerate(timestamps):

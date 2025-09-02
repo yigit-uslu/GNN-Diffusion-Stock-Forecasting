@@ -108,14 +108,13 @@ batch_size_diffusion=1
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
 
 
-
 ################ PRE-EXPERIMENT NOTES ####################
 load_cd_train_chkpt_path_diffusion="none" # "Power-Allocation-GDM-Experiments/09-Jul/100-nodes-graph-density-12-rmin-0.6/batch_size_diffusion-16/norm_layer_diffusion-layer/1752273515.731762_seed_2024/cd-models/cd_train_chkpt_epoch_399.pt" # "Power-Allocation-GDM-Experiments/07-Jul/100-nodes-graph-density-12-rmin-0.6/batch_size_diffusion-2/norm_layer_diffusion-layer/1752269408.9051833_seed_2024/cd-models/cd_train_chkpt_epoch_95.pt"
 
 
 # num_graphs=80 # 32
 MAX_EFFECTIVE_BATCH_SIZE_DIFFUSION=200
-EFFECTIVE_TRAINING_STEPS=100000 #128000
+EFFECTIVE_TRAINING_STEPS=500000 #100000
 # CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=$(expr 100 / $MAX_JOBS)
 
 norm_layer_diffusion_values=("layer")

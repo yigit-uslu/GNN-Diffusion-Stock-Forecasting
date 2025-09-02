@@ -143,7 +143,6 @@ def channelListParser(v, v_type='int'):
     return new_values
 
 
-    
 
 def str2dict(v, v_type='str'):
     keys = ["train", "val", "test"]

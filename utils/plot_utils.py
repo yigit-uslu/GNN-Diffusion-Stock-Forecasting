@@ -123,7 +123,23 @@ def plot_regression_errors(preds, target, metric, stocks_idx = None, fig = None,
 
         for idx, stock_idx in enumerate(stocks_idx):
             ax = axs[idx // 2, idx % 2]
-            ax.plot(preds[:, stock_idx, 0].detach().cpu().numpy(), linestyle = '--', label="Predictions" if preds.shape[-1] == 1 else None)
+
+            num_segments = 1 if preds.shape[-2] == 1 else preds.shape[0] // preds.shape[-2]
+
+            if num_segments > 1:
+                segment_size = preds.shape[-2]
+                for ii in range(num_segments):
+                    start_idx = ii * segment_size
+                    end_idx = (ii + 1) * segment_size if ii < num_segments - 1 else preds.shape[0]
+
+                    ax.plot(np.arange(start_idx, end_idx), preds[start_idx, stock_idx].detach().cpu().numpy(),
+                                linestyle = '--', label = "Predictions" if preds.shape[-1] == 1 and ii == 0 else None)
+
+                    ax.axvline(end_idx, linestyle=':', color='black', label=r'$t = T_p + T_h$' if ii == 0 else None)
+
+            else:
+                ax.plot(preds[:, stock_idx, 0].detach().cpu().numpy(), linestyle = '--', label="Predictions" if preds.shape[-1] == 1 else None)
+            
             ax.plot(target[:, stock_idx, 0].detach().cpu().numpy(), marker = 'd', markersize = 4, markevery = 10, label="Target")
             ax.set_title(f"{metric} of Stock {stock_idx}")
             ax.set_xlabel("Timestamp (Date)")

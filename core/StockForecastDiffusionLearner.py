@@ -169,11 +169,18 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
         return val_metrics
 
 
-    def batch_from_data_list(self, data_list, exclude_keys, remap_keys=None, batch_size=None):
+    def batch_from_data_list(self, data_list, exclude_keys, follow_batch = ["y"]):
         data_batch = Batch.from_data_list(data_list = data_list,
-                                          follow_batch=['y'],
+                                          follow_batch=follow_batch,
                                           exclude_keys=exclude_keys
                                           )
+
+        if data_batch.num_graphs == len(data_list):
+            print("data_batch.num_graphs: ", data_batch.num_graphs)
+            # Store the actual number of graphs in a custom attribute
+            actual_num_graphs = len(data_list) * data_list[0].num_graphs
+            data_batch._actual_num_graphs = actual_num_graphs
+            print("data_batch._actual_num_graphs: ", data_batch._actual_num_graphs)
 
         for key in data_batch.keys():
             if key in ["Features", "Target"]:
@@ -192,6 +199,9 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                                                exclude_keys = None)
         
         print(f"Data: ", data, "\tData_batch: ", data_batch)
+        # Use the actual number of graphs if available
+        num_graphs = getattr(data_batch, '_actual_num_graphs', data_batch.num_graphs)
+        print(f"Using num_graphs: {num_graphs}")
 
         try:
             y_batch_debug_idx = torch.arange(0, len(data_batch.y_batch), step = (len(data.ptr) - 1) // 2).to(data_batch.y_batch.device)
@@ -219,7 +229,10 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
             for t in tqdm(range(self.diffusion_steps-1, 0, -1)):
 
-                predicted_noise = model(y, torch.full([y.shape[0], 1], t).to(device), data_batch)
+                predicted_noise = model(y, torch.full(size = (y.shape[0], 1), fill_value=t, device=y.device), data_batch)
+
+                if t == self.diffusion_steps - 1:
+                    print("Predicted_noise.shape: ", predicted_noise.shape)
 
                 # See DDPM paper between equations 11 and 12
                 y = 1 / (self.alphas[t] ** 0.5) * (y - (1 - self.alphas[t]) / ((1-self.baralphas[t]) ** 0.5) * predicted_noise)
@@ -396,8 +409,22 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
                 for batch_idx, data in enumerate(dataloader[phase]):
 
+
+                    # #### Clone the graph data ####
+                    # data = self.batch_from_data_list(data_list = [datum.clone() for _ in range(self.config.batch_size)],
+                    #                                     exclude_keys=["close_price", "close_price_y", "stocks_index", "timestamp"],
+                    #                                     follow_batch=None
+                    #                                     )
+
                     accelerator.print(f"Batch idx: {batch_idx}\tData: ", data)
                     accelerator.print(f"Data.num_graphs: {data.num_graphs}")
+
+                    # Use the actual number of graphs if available
+                    # num_graphs = getattr(data, '_actual_num_graphs', data.num_graphs)
+                    # print(f"Using num_graphs: {num_graphs}")
+
+                    # assert data._actual_num_graphs == datum.num_graphs * self.config.batch_size, f"Data.num_graphs: {data._actual_num_graphs} != datum.num_graphs * batch_size: {datum.num_graphs * self.config.batch_size}"
+                    # assert data.num_nodes == datum.num_nodes * self.config.batch_size, f"Data.num_nodes: {data.num_nodes} != datum.num_nodes * batch_size: {datum.num_nodes * self.config.batch_size}"
 
                     if epoch == 0 and phase == 'train':
                         # Log batched data for reference in the first epoch only.
@@ -411,6 +438,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
                             ##################### Training logic ##################### 
                             model.zero_grad()
+
                             data = data.to(device)
 
                             # Generate random diffusion timesteps
@@ -502,7 +530,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                     # Sample from the trained model and regress
 
                     for eval_phase in ["train-val", "val"]:
-                        nsamples = 10
+                        nsamples = 2 # 10
                         eval_metrics = self.eval(accelerator=accelerator, model = model, data = next(iter(dataloader[eval_phase])), nsamples = nsamples, device = device, sampler = "ddpm")
                         log_dict.update({f"{self.__class__.__name__}-Evaluation/{eval_phase}-{k}": v for k, v in eval_metrics.items()})
 

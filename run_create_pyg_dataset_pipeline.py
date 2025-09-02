@@ -3,9 +3,12 @@ from typing import Union
 import pandas as pd
 import numpy as np
 
+import torch
 from torch_geometric.data import Dataset
 from datasets.SP100Stocks import SP100Stocks
 from torch_geometric.loader import DataLoader
+
+from torch.utils.data.sampler import WeightedRandomSampler
 
 from utils.plot_utils import plot_batched_data
 from utils.stock_data_utils import compute_stocks_correlation_graph, group_SP100_stocks_by_sector, merge_stock_relation_graphs
@@ -13,7 +16,7 @@ from utils.stock_data_utils import compute_stocks_correlation_graph, group_SP100
 
 def create_dataloaders(args, arg_groups, accelerator, dataset) -> Union[DataLoader, dict[str, DataLoader]]:
 
-    batch_size_train = arg_groups['CD-train-algo'].x_batch_size * arg_groups['CD-train-algo'].batch_size
+    batch_size_train = arg_groups['CD-train-algo'].x_batch_size * arg_groups["CD-train-algo"].batch_size_diffusion
 
     # Split the dataset into train/val/test sets
     train_part = arg_groups["dataset"].train_dataset_fraction
@@ -30,9 +33,25 @@ def create_dataloaders(args, arg_groups, accelerator, dataset) -> Union[DataLoad
     accelerator.print(f"Validation dataset: {len(val_dataset)} / {len(dataset)} samples.")
     accelerator.print(f"Test dataset: {len(test_dataset)} / {len(dataset)} samples.")
 
+    if batch_size_train > len(train_dataset):
+        # Create weights (uniform for simplicity)
+        weights = torch.ones(len(train_dataset))
+        # Create sampler - key point: num_samples can be any value
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=batch_size_train,  # e.g., 1500 samples per epoch
+            replacement=True  # This is crucial!
+        )
+    else:
+        sampler = None
+
     dataloaders = {
-        "train": DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True, pin_memory=True,
+        "train": DataLoader(train_dataset, batch_size=batch_size_train,
+                            sampler=sampler,
+                            shuffle=True if sampler is not None else False,
+                            pin_memory=True,
                             follow_batch=["y"]),
+
         "train-val": DataLoader(train_val_dataset, batch_size=len(train_val_dataset), shuffle=False, pin_memory=True, drop_last=True,
                                 follow_batch=["y"]),
         "val": DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False, pin_memory=True, drop_last=True,

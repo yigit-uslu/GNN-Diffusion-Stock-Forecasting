@@ -42,7 +42,10 @@ def run_diffusion_training(args, arg_groups, accelerator,
     
     accelerator.print(f"Created diffusion learner of class {cd_learner.__class__.__name__} for stock price forecasting.")
 
-
+     # Update args with the actual number of edge features that will be used
+    arg_groups["CD-model"].edge_features_nb += 1 if arg_groups["dataset"].temporal_correlation_graph is True else 0
+    args.edge_features_nb_diffusion = arg_groups["CD-model"].edge_features_nb
+    
     # Create and train a diffusion model policy to forecast stock prices
     cd_model, is_cd_model_trained = create_cd_model(accelerator=accelerator,
                                                     args=arg_groups['CD-model'],

@@ -9,8 +9,7 @@ SCRIPT="train"
 CUDA_VISIBLE_DEVICES=0 # Set this to the GPU you want to use, e.g., 0, 1, 2, etc.
 
 # group_name="17-Aug/100-nodes-graph-density-12-rmin-0.6"
-group_name="01-Sep/UnitTests"
-
+group_name="03-Sep/UnitTests-Temporal-GNN-Diffusion"
 
 
 ################################ GENERAL CONFIG ################################
@@ -52,8 +51,6 @@ log_dataset=True
 
 
 
-
-
 ################################### ACCELERATOR CONFIG ###################################
 ##########################################################################################
 
@@ -73,10 +70,10 @@ auto_device_placement=False
 dataset_name="S&P 100"
 # data_dir="./SP100AnalysisWithGNNs/data/SP100/raw"
 data_dir="./datasets/raw"
-corr_threshold=0.7 # Thresholding for the correlation matrix
+corr_threshold=0.6 # 0.7 Thresholding for the correlation matrix
 sector_bonus=0.05 # Bonus for stocks sharing the same sector
 past_window=25 # Past window of features including closing prices and daily log returns
-future_window=$past_window # Set these windows equal
+future_window=10 # Set these windows equal =$past_window
 
 ################################################################################
 ################################ DATASET CONFIG ################################
@@ -86,26 +83,26 @@ future_window=$past_window # Set these windows equal
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
 ###########################################################################
 
-gnn_backbone_diffusion="resplus-gnn"
+gnn_backbone_diffusion="temporal-resplus-gnn"
 ###############################
-lr_diffusion=1e-3 # 1e-2
+lr_diffusion=3e-3 # 1e-2
 weight_decay_diffusion=1e-4 # 1e-4
-lr_sched_gamma_diffusion=0.8 # 0.5 # 0.9
+lr_sched_gamma_diffusion=0.9 # 0.5 # 0.9
 pgrad_clipping_constant_diffusion=10.0
 ###############################
-n_layers_diffusion=6 # 4
+n_layers_diffusion=4 # 4
 k_hops_diffusion=2
 norm_layer_diffusion="graph" # "batch"
 layer_norm_mode_diffusion="node"
-conv_layer_normalize_diffusion=True # GCN normalization applied to the graph.
+conv_layer_normalize_diffusion=False # GCN normalization applied to the graph.
 dropout_rate_diffusion=0.2
 ###############################
 hidden_dim_diffusion=64 # 128
 ###############################
-x_batch_size_diffusion=50 # 5000
+x_batch_size_diffusion=200 # 64
 diffuse_n_samples_diffusion=500
 sampler_diffusion="ddpm"
-batch_size_diffusion=10
+batch_size_diffusion=1 # 10
 
 ###########################################################################
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################

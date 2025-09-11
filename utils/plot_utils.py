@@ -101,7 +101,68 @@ def plot_batched_data(data: Data,
 
 
 
-def plot_regression_errors(preds, target, metric, stocks_idx = None, fig = None, axs = None):
+def plot_regression(preds, target, observations, timestamps = None, fig = None, axs = None, **kwargs):
+    """
+    Plot regression for the specified stock over a given time period.
+    Input:
+    - observations: np.ndarray of shape [batch_size, past_window]
+    - timestamps: np.ndarray of shape [batch_size, past_window + future_window] (optional)
+    - preds: np.ndarray of shape [batch_size, future_window, nsamples]
+    - target: np.ndarray of shape [batch_size, future_window]
+    """
+
+    metric = kwargs.get("metric", "Log Return")
+    stock_idx = kwargs.get("stocks_idx", 0)
+
+    B, future_window, nsamples = preds.shape
+    past_window = observations.shape[1]
+
+    assert observations.shape[0] == B, "Mismatch in batch size between observations and preds."
+    assert target.shape[0] == B, "Mismatch in batch size between target and preds."
+    assert target.shape[1] == future_window, "Mismatch in future window size between target and preds."
+
+    if timestamps is None:
+        timestamps = np.arange(past_window + future_window).repeat(B, axis=0)  # [B, past_window + future_window]
+
+
+    with sns.axes_style("darkgrid"):
+        if fig is None or axs is None:
+            fig, axs = plt.subplots(nrows = int(np.ceil(B/ 2)), ncols = 2, figsize = (12, 6), squeeze = False)
+
+        assert B <= len(axs.flatten()), "Number of timestamps to plot exceeds number of subplots available."
+
+        for idx in range(B):
+            ax = axs[idx // 2, idx % 2]
+
+            target_cts = np.concatenate([observations[idx, -1:].reshape(1), target[idx].reshape(-1)])  # [future_window + 1]
+            preds_cts = np.concatenate([np.repeat(observations[idx, -1:].reshape(1, 1), repeats=nsamples, axis=1), preds[idx]], axis=0)  # [future_window + 1, nsamples]
+
+            ax.plot(timestamps[idx, :past_window], observations[idx], label="Observations", color='black')
+            ax.plot(timestamps[idx, -future_window-1:], preds_cts, linestyle = '--', alpha = 0.7, label="Predictions" if nsamples == 1 else None)
+            ax.plot(timestamps[idx, -future_window-1:], target_cts, marker = 'd', markersize = 4, markevery = 10, label="Target")
+
+            # # Connect last plotted point of observations to first plotted point of predictions
+            # ax.plot(timestamps[idx, past_window - 1:past_window + 1], 
+            #         [observations[idx, -1].detach().cpu().numpy(), preds[idx, 0].detach().cpu().numpy()],
+            #         linestyle = '-', color='black', alpha = 0.7)
+        
+            ax.set_title(f"{metric} of Stock {stock_idx}")
+            ax.set_xlabel("Timestamp (Date)")
+            ax.set_ylabel(metric)
+            ax.grid(True)
+            ax.legend()
+
+        # fig.tight_layout()
+
+    return fig, axs
+
+
+
+
+
+def plot_regression_errors_deprecated(preds, target, metric, stocks_idx = None, fig = None, axs = None,
+                           segment_timestamps = True,
+                           confidence_band_kws = None):
     """
     Plot regression errors for the specified stocks.
     Input:
@@ -111,6 +172,9 @@ def plot_regression_errors(preds, target, metric, stocks_idx = None, fig = None,
     """
     print("Plotting regression errors...")
     print(f"preds.shape: {preds.shape}\tTarget.shape: {target.shape}.")
+
+    if confidence_band_kws is not None:
+        confidence_interval = confidence_band_kws.get("confidence_interval", 0.95)
 
     if stocks_idx is None:
         stocks_idx = np.random.choice(preds.shape[1], 4, replace = False) # 4 random stocks
@@ -124,29 +188,42 @@ def plot_regression_errors(preds, target, metric, stocks_idx = None, fig = None,
         for idx, stock_idx in enumerate(stocks_idx):
             ax = axs[idx // 2, idx % 2]
 
-            num_segments = 1 if preds.shape[-2] == 1 else preds.shape[0] // preds.shape[-2]
+            if preds.shape[-2] == 1:
+                num_segments = 1
+            elif segment_timestamps:
+                num_segments = preds.shape[0] // preds.shape[-2]
+            else:
+                num_segments = preds.shape[0]
+            # num_segments = 1 if preds.shape[-2] == 1 else preds.shape[0] // preds.shape[-2]
 
             if num_segments > 1:
                 segment_size = preds.shape[-2]
                 for ii in range(num_segments):
-                    start_idx = ii * segment_size
-                    end_idx = (ii + 1) * segment_size if ii < num_segments - 1 else preds.shape[0]
+                    time_start = ii * segment_size
+                    time_end = (ii + 1) * segment_size # if ii < num_segments - 1 else preds.shape[0]
 
-                    ax.plot(np.arange(start_idx, end_idx), preds[start_idx, stock_idx].detach().cpu().numpy(),
-                                linestyle = '--', label = "Predictions" if preds.shape[-1] == 1 and ii == 0 else None)
+                    preds_start_idx = time_start if segment_timestamps else ii
 
-                    ax.axvline(end_idx, linestyle=':', color='black', label=r'$t = T_p + T_h$' if ii == 0 else None)
+                    ax.plot(np.arange(time_start, time_end), preds[preds_start_idx, stock_idx].detach().cpu().numpy(),
+                                linestyle = '--', alpha = 0.7, label = "Predictions" if preds.shape[-1] == 1 and ii == 0 else None)
+
+                    ax.axvline(time_end, linestyle=':', color='black', alpha = 0.5, label=r'$t = T_p + T_h$' if ii == 0 else None)
+
+                # target_timestamps = np.arange(0, target.shape[0], segment_size)
+                ax.plot(target[:, stock_idx, :, 0].flatten().detach().cpu().numpy(), marker = 'd', markersize = 4, markevery = 10, label="Target")
+
 
             else:
-                ax.plot(preds[:, stock_idx, 0].detach().cpu().numpy(), linestyle = '--', label="Predictions" if preds.shape[-1] == 1 else None)
-            
-            ax.plot(target[:, stock_idx, 0].detach().cpu().numpy(), marker = 'd', markersize = 4, markevery = 10, label="Target")
-            ax.set_title(f"{metric} of Stock {stock_idx}")
+                ax.plot(preds[:, stock_idx, 0].detach().cpu().numpy(), linestyle = '--', alpha = 0.7, label="Predictions" if preds.shape[-1] == 1 else None)
+                # target_timestamps = np.arange(target.shape[0])
+                ax.plot(target[:, stock_idx, 0].detach().cpu().numpy(), marker = 'd', markersize = 4, markevery = 10, label="Target")
+
+            ax.set_title(f"{metric} of Stock {stock_idx}" + r" $(T_h = {})$".format(preds.shape[-2]))
             ax.set_xlabel("Timestamp (Date)")
             ax.set_ylabel(metric)
             ax.grid(True)
             ax.legend()
-
+ 
     return fig, axs
 
 

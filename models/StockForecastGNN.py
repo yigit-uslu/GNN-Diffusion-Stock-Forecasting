@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from models.ResidualGNN import ResidualGNN, ResidualGNNwithConditionalEmbeddings
+from models.ResidualGNN import ResidualGNNwithConditionalEmbeddings
 
 
 # class StockForecastGNN(ResidualGNN):
@@ -175,10 +175,14 @@ class StockForecastDiffusionGNN(nn.Module):
         attn_self_loop_fill_value = kwargs.get('attn_self_loop_fill_value', "max")
         apply_gcn_norm = kwargs.get("apply_gcn_norm", False)
         norm = kwargs.get('norm', 'batch')
+        conv_model = kwargs.get('conv_model', 'TAGConv')
         conv_layer_normalize = kwargs.get('conv_layer_normalize', False)
         k_hops = kwargs.get('k_hops', 2)
         dropout_rate = kwargs.get('dropout_rate', 0.0)
         norm_kws = kwargs.get('norm_kws', dict())
+        edge_features_nb = kwargs.get('edge_features_nb', 1)
+        aggr_list = kwargs.get("aggr_list", None)
+        conv_batch_norm = kwargs.get("conv_batch_norm", False)
 
         self.gnn = StockForecastGNN(in_channels=nfeatures, # nfeatures # nunits,
                                     hidden_channels=nunits, out_channels=nfeatures, # out_channels don't matter
@@ -187,12 +191,16 @@ class StockForecastDiffusionGNN(nn.Module):
                                     norm=norm,
                                     num_features=num_features_cond,
                                     num_timesteps=num_timesteps_cond,
-                                    conv_layer_normalize=conv_layer_normalize,
                                     k_hops=k_hops,
                                     dropout_rate=dropout_rate,
+                                    conv_model=conv_model,
+                                    conv_layer_normalize=conv_layer_normalize,
                                     use_checkpointing=use_checkpointing,
                                     use_res_connection_time_embed=use_res_connection_time_embed,
-                                    norm_kws = norm_kws
+                                    norm_kws=norm_kws,
+                                    edge_features_nb=edge_features_nb,
+                                    aggr_list=aggr_list,
+                                    conv_batch_norm=conv_batch_norm
                                     )
 
         

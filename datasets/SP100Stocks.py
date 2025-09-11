@@ -5,7 +5,8 @@ import pandas as pd
 import torch
 from torch_geometric.data import Dataset, Data
 # from notebooks.datasets.utils import get_graph_in_pyg_format
-from datasets.utils import get_graph_in_pyg_format, get_column_idx
+from datasets.utils import combine_edge_features, get_graph_in_pyg_format, get_column_idx
+from utils.covariance_graph_utils import target_to_graph
 
 
 class StocksDataDiffusion(Data):
@@ -55,16 +56,18 @@ class StocksDataDiffusion(Data):
 class SP100Stocks(Dataset):
 	"""
 	Stock price data for the S&P 100 companies.
-	The graph data built from the notebooks is used.
 	"""
 
 	def __init__(self, root: str = "../data/SP100/", values_file_name: str = "values.csv", adj_file_name: str = "adj.npy", past_window: int = 25, future_window: int = 1,
-			  target_column_name: str = "NormClose", force_reload: bool = False, transform: Callable = None):
+			  target_column_name: str = "NormClose",
+			  corr_threshold: float = None,
+			  force_reload: bool = False, transform: Callable = None):
 		self.values_file_name = values_file_name
 		self.adj_file_name = adj_file_name
 		self.past_window = past_window
 		self.future_window = future_window
 		self.target_column_name = target_column_name
+		self.corr_threshold = corr_threshold
 		super().__init__(root, force_reload=force_reload, transform=transform)
 
 	@property
@@ -90,25 +93,83 @@ class SP100Stocks(Dataset):
 		)
 
 		self.info = info_dict
-
 		target_column_idx = get_column_idx(values_path_or_df=osp.join(self.root, f"raw/{self.values_file_name}"),
 											column_name=info_dict["Target"]
 											) - 1 # subtract one because we dropped the first column from values
 		print("Target column name / index:", f"{info_dict['Target']} / {target_column_idx}")
 
-		timestamps = [
-			StocksDataDiffusion(
-				x=x[:, :, idx:idx + self.past_window],
-				edge_index=edge_index,
-				edge_weight=edge_weight,
-				close_price=close_prices[:, idx:idx + self.past_window],
-				y=x[:, target_column_idx, idx + self.past_window:idx + self.past_window + self.future_window],
-				close_price_y=close_prices[:, idx + self.past_window:idx + self.past_window + self.future_window],
-				stocks_index=torch.arange(x.shape[0]),
-				timestamp=torch.LongTensor([idx]).repeat(x.shape[0]), # Repeat for each node in the batch
-				info=info_dict
-			) for idx in range(x.shape[2] - self.past_window - self.future_window)
-		]
+		
+		timestamps = []
+		for idx in range(x.shape[2] - self.past_window - self.future_window):
+			if self.corr_threshold is not None:	
+				# Recompute edge_index and edge_weight based on correlation of closing prices in the current window
+				# window_close_prices = close_prices[:, idx:idx + self.past_window]
+				past_window_y = x[:, target_column_idx, idx:idx + self.past_window]
+
+				# print(f"Last stock target values in all window: {x[-1, target_column_idx, :]}")
+
+				# print(f"At time index {idx}, past window {info_dict['Target']} is {past_window_y}.")
+				edge_index_t_corr, edge_weight_t_corr = target_to_graph(
+					past_window_y,
+					method="correlation", 
+					threshold=self.corr_threshold,
+					use_absolute=True,
+					remove_self_loops=True,
+					normalize=True,
+					save_path=self.root + f"/raw/temporal_corr_{idx}.pdf" if idx < 10 else None
+				)
+
+				# Make sure none of the edge weights are NaN
+				assert not torch.isnan(edge_weight_t_corr).any(), "Edge weights contain {} many NaN values.".format(torch.isnan(edge_weight_t_corr).sum().item())
+
+				print(f"At time index {idx}, computed temporal correlation graph with {edge_weight_t_corr.size(0)} edges based on closing prices in the window [{idx}, {idx + self.past_window}).") if idx < 10 else None
+
+				# Combine your graphs
+				combined_edge_index, combined_edge_weight = combine_edge_features(
+					edge_index, edge_weight,           # Existing graph
+					edge_index_t_corr, edge_weight_t_corr,  # Windowed temporal correlation graph
+					fill_value=0.0,                     # Value for missing edges
+					debug_print= idx < 10               # Print debug info for first 10 time steps
+				)
+
+				assert combined_edge_weight.dim() == 2, "combined_edge_weight should have shape (num_edges, num_features)"
+				print(f"Temporal correlation graph added {combined_edge_weight.size(0) - edge_weight.size(0)} additional edges to multi-graph.") if idx < 10 else None
+
+				# Make sure none of the edge weights are NaN
+				assert not torch.isnan(combined_edge_weight).any(), "Edge weights contain {} many NaN values.".format(torch.isnan(combined_edge_weight).sum().item())
+
+			else:
+				combined_edge_index, combined_edge_weight = edge_index, edge_weight
+			
+			timestamps.append(
+				StocksDataDiffusion(
+					x=x[:, :, idx:idx + self.past_window],
+					edge_index=combined_edge_index,
+					edge_weight=combined_edge_weight,
+					close_price=close_prices[:, idx:idx + self.past_window],
+					y=x[:, target_column_idx, idx + self.past_window:idx + self.past_window + self.future_window],
+					close_price_y=close_prices[:, idx + self.past_window:idx + self.past_window + self.future_window],
+					stocks_index=torch.arange(x.shape[0]),
+					timestamp=torch.LongTensor([idx]).repeat(x.shape[0]), # Repeat for each node in the batch
+					info=info_dict
+				)
+			)
+		
+
+		# Original code without dynamic graph computation
+		# timestamps = [
+		# 	StocksDataDiffusion(
+		# 		x=x[:, :, idx:idx + self.past_window],
+		# 		edge_index=edge_index,
+		# 		edge_weight=edge_weight,
+		# 		close_price=close_prices[:, idx:idx + self.past_window],
+		# 		y=x[:, target_column_idx, idx + self.past_window:idx + self.past_window + self.future_window],
+		# 		close_price_y=close_prices[:, idx + self.past_window:idx + self.past_window + self.future_window],
+		# 		stocks_index=torch.arange(x.shape[0]),
+		# 		timestamp=torch.LongTensor([idx]).repeat(x.shape[0]), # Repeat for each node in the batch
+		# 		info=info_dict
+		# 	) for idx in range(x.shape[2] - self.past_window - self.future_window)
+		# ]
 		for t, timestep in enumerate(timestamps):
 			torch.save(
 				timestep, osp.join(self.processed_dir, f"timestep_{t}.pt")

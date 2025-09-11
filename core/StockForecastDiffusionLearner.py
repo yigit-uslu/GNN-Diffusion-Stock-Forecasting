@@ -7,8 +7,10 @@ from tqdm import tqdm
 import wandb
 import abc
 
-from datasets.utils import daily_log_returns_to_closing_prices, daily_log_returns_to_log_returns
-from models.utils import get_regression_errors, log_plot_regression_errors
+from core.GRW import GeometricRandomWalk as GRW
+from datasets.utils import daily_log_returns_to_closing_prices, daily_log_returns_to_log_returns, gather_target_preds_observations_and_timestamps, run_correlated_geometric_random_walk_baseline, run_geometric_random_walk_baseline
+from models.eval import get_probabilistic_errors, get_regression_errors
+from models.utils import log_plot_regression, log_regression_errors
 from utils.diffusion_model_utils import save_cd_train_chkpt
 
 
@@ -90,7 +92,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
         if lr_sched is None:
             # lr_sched = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma = 0.9)
-            T_0=10
+            T_0=10 # 10
             T_mult=2
             gamma=self.config.lr_sched_gamma if hasattr(self.config, "lr_sched_gamma") and self.config.lr_sched_gamma is not None else 0.9
             # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max = n_epochs // 10, eta_min=lr * 1e-2)
@@ -121,8 +123,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
 
     def make_validation_criteria_fnc(self):
-        return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
-        # return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
+        # return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
+        return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
     
 
     def model_trained_criterion(self):
@@ -137,32 +139,33 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
         val_metrics = defaultdict(list)
         model.eval()
+
+        n_val_iters = 10 
         with torch.inference_mode(True):
-            for data in val_dataloader:
-                data = data.to(device)
-                # Generate random diffusion timesteps
-                timesteps = self.generate_random_timesteps(num_steps = self.diffusion_steps,
-                                                            size = (data.num_graphs, 1), 
-                                                            device = device,
-                                                            weights = None
-                                                            )
-                        # accelerator.print("Timesteps.shape: ", timesteps.shape             
-                timesteps = timesteps.repeat_interleave(repeats = data.num_nodes // data.num_graphs, dim = 0)
-                assert timesteps.shape[0] == data.y.shape[0], f"Shape mismatch: {timesteps.shape[0]} != {data.y.shape[0]}"
+            for iter in range(n_val_iters):
+                for data in val_dataloader:
+                    data = data.to(device)
+                    # Generate random diffusion timesteps
+                    timesteps = self.generate_random_timesteps(num_steps = self.diffusion_steps,
+                                                                size = (data.num_graphs, 1), 
+                                                                device = device,
+                                                                weights = None
+                                                                )
+                            # accelerator.print("Timesteps.shape: ", timesteps.shape             
+                    timesteps = timesteps.repeat_interleave(repeats = data.num_nodes // data.num_graphs, dim = 0)
+                    assert timesteps.shape[0] == data.y.shape[0], f"Shape mismatch: {timesteps.shape[0]} != {data.y.shape[0]}"
 
-                # Add random noise to clean samples
-                y_0 = data.y.clone()
-                noisy_y_t, eps = self.noise(y_0, timesteps)
+                    # Add random noise to clean samples
+                    y_0 = data.y.clone()
+                    noisy_y_t, eps = self.noise(y_0, timesteps)
 
-                # Predict noise
-                pred_noise = model(noisy_y_t, timesteps, data)
+                    # Predict noise
+                    pred_noise = model(noisy_y_t, timesteps, data)
 
-                loss = self.loss_fn(pred_noise, eps).mean()
+                    # Compute the diffusion loss as the validation metric.
+                    loss = self.loss_fn(pred_noise, eps).mean()
+                    val_metrics["loss"].append(loss)
 
-                val_metrics["loss"].append(loss)
-
-                # Compute validation metrics
-                # ...
 
         val_metrics["loss"] = sum(val_metrics["loss"]) / len(val_metrics["loss"]) if val_metrics["loss"] else 0.0
 
@@ -278,11 +281,10 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
         model.eval()
         data = data.to(device)
 
-        num_timestamps = len(data.ptr) - 1
-        num_stocks = data.x.shape[0] // num_timestamps
-        num_features, past_window = data.x.shape[1], data.x.shape[2]  # num_features, past_window
-
-        target = data.y.reshape(len(data.ptr) - 1, num_stocks, -1) # num_timestamps, num_stocks, future_window
+        # num_timestamps = len(data.ptr) - 1
+        # num_stocks = data.x.shape[0] // num_timestamps
+        # num_features, past_window = data.x.shape[1], data.x.shape[2]  # num_features, past_window
+        # target = data.y.reshape(len(data.ptr) - 1, num_stocks, -1) # num_timestamps, num_stocks, future_window
 
         ygen, ygen_hist = self.accelerated_sample(model = model, data=data, sampler=sampler, nsamples=nsamples, device=device)
 
@@ -291,67 +293,232 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
         batch_gen = ygen_hist["data_batch"].batch.to(device)
         stocks_index_gen = ygen_hist["data_batch"].stocks_index.to(device)
 
-        accelerator.print(f"[Timestamps, y_batch, batch_gen] in the generated batch [::(len(data.ptr) - 1) // 20]: {torch.stack([timestamps_gen[::(len(data.ptr) - 1) // 20], y_batch_gen[::(len(data.ptr) - 1) // 20], batch_gen[::(len(data.ptr) - 1) // 20]], dim = -1)}")
-        accelerator.print(f"Stocks_index in the generated batch [::(len(data.ptr) - 1) // 20]: {stocks_index_gen[::num_stocks // 5]}")
 
-        preds = ygen.reshape(-1, num_stocks, *target.shape[2:]) # [num_timestamps * nsamples, num_stocks, future_window]    
+        preds, target, observations, obs_and_pred_timestamps = gather_target_preds_observations_and_timestamps(data = data,
+                                                                                                               ygen = ygen,
+                                                                                                               timestamps = timestamps_gen,
+                                                                                                               stocks_index = stocks_index_gen,
+                                                                                                               debug_assert = self.global_chkpt_step < 2,
+                                                                                                               debug_print = self.global_chkpt_step < 2
+                                                                                                               )
+        num_timestamps, num_stocks, future_window, nsamples = preds.shape
+        past_window = observations.shape[2]
+
+        target_metric = data.info["Target"] if isinstance(data.info["Target"], str) else data.info["Target"][0]
+
+
+        # Get daily log returns and convert to log returns
+        pred_log_returns = daily_log_returns_to_log_returns(preds, time_dim = 2)
+        target_log_returns = daily_log_returns_to_log_returns(target, time_dim = 2)
+        observations_log_returns = daily_log_returns_to_log_returns(observations, time_dim = 2)
+
+        # print("Pred log returns: ", pred_log_returns)
+        # print("Target log returns: ", target_log_returns)
+        # print("Observations log returns: ", observations_log_returns)
+
+        target_log_returns = target_log_returns + observations_log_returns[:, :, -1:].unsqueeze(-1).expand_as(target_log_returns)
+        pred_log_returns = pred_log_returns + observations_log_returns[:, :, -1:].unsqueeze(-1).expand_as(pred_log_returns)
+
+
+        ################ Baseline model: Uncorrelated Geometric Random Walk #################
+        # Fit a Geometric Brownian Motion to the past observations and plot its predictions
+        grw_pred_log_returns = run_geometric_random_walk_baseline(observations = observations,
+                                                                  obs_and_pred_timestamps = obs_and_pred_timestamps,
+                                                                  nsamples = nsamples
+                                                                  )
+        grw_pred = grw_pred_log_returns - torch.cat([observations_log_returns[:, :, -1:].unsqueeze(3).repeat(1, 1, 1, grw_pred_log_returns.shape[3]), grw_pred_log_returns[:, :, :-1, :]], dim = 2)
+
+        # grw_pred_log_returns = grw_pred_log_returns + observations_log_returns[:, :, -1:].unsqueeze(-1).expand_as(grw_pred_log_returns)
         
-        preds_stocks_index = stocks_index_gen.reshape(-1, num_stocks, 
-                                                    #   *target.shape[2:-1],
-                                                        1) # [num_timestamps * nsamples, num_stocks, 1]
-        assert torch.all(preds_stocks_index[:, 0] == 0), "Stocks index should be 0 for all samples."
-        assert torch.all(preds_stocks_index[:, 2] == 2), "Stocks index should be 2 for all samples."
-        assert torch.all(preds_stocks_index[:, -1] == num_stocks - 1), f"Stocks index should be {num_stocks - 1} for all samples."
+        ################ Baseline model: Uncorrelated Geometric Random Walk #################
 
-        # Split ygen into nsamples chunks and stack them across the last dimension
-        preds = torch.stack(torch.chunk(preds, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, future_window, nsamples]
 
-        preds_timestamps = timestamps_gen.reshape(-1, num_stocks, 
-                                                 #   *target.shape[2:-1],
-                                                    1) # [num_timestamps * nsamples, num_stocks, 1]
-        preds_timestamps = torch.stack(torch.chunk(preds_timestamps, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, 1, nsamples]
-        assert torch.all(preds_timestamps[0] == preds_timestamps[0, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[0, 0, 0, 0]} for all samples but it is {preds_timestamps[0]}."
-        assert torch.all(preds_timestamps[2] == preds_timestamps[2, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[2, 0, 0, 0]} for all samples but it is {preds_timestamps[2]}."
-        assert torch.all(preds_timestamps[-1] == preds_timestamps[-1, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[-1, 0, 0, 0]} for all samples but it is {preds_timestamps[-1]}."
 
-        assert torch.all(preds_timestamps[3, 0] == preds_timestamps[3, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 0, 0, 0]} for all samples but it is {preds_timestamps[3, 0]}."
-        assert torch.all(preds_timestamps[3, 2] == preds_timestamps[3, 2, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 2, 0, 0]} for all samples but it is {preds_timestamps[3, 2]}."
-        assert torch.all(preds_timestamps[3, -1] == preds_timestamps[3, -1, 0, 0]), f"Timestamps index should be {preds_timestamps[3, -1, 0, 0]} for all samples but it is {preds_timestamps[3, -1]}."
 
-        target.unsqueeze_(-1) # [num_timestamps, num_stocks, future_window, 1]
-        assert preds.shape[:3] == target.shape[:3], f"Shape mismatch: {preds.shape} != {target.shape}"
+
+        ################ Baseline model: Correlated Geometric Random Walk #################
+        # Fit a Correlated Geometric Brownian Motion to the past observations and plot its predictions
+        # cgrw_pred_log_returns = run_correlated_geometric_random_walk_baseline(observations = observations,
+        #                                                                      obs_and_pred_timestamps = obs_and_pred_timestamps,
+        #                                                                      nsamples = nsamples
+        #                                                                      )
+        
+        # cgrw_pred = cgrw_pred_log_returns - torch.cat([torch.zeros_like(cgrw_pred_log_returns[:, :, 0:1, :]), cgrw_pred_log_returns[:, :, :-1, :]], dim = 2)
+
+        # cgrw_pred_log_returns = cgrw_pred_log_returns + observations_log_returns[:, :, -1:].unsqueeze(-1).expand_as(cgrw_pred_log_returns)
+        ################ Baseline model: Correlated Geometric Random Walk #################
+
+
+
+
+
+
+        # preds = ygen.reshape(-1, num_stocks, *target.shape[2:]) # [num_timestamps * nsamples, num_stocks, future_window]    
+        
+        # preds_stocks_index = stocks_index_gen.reshape(-1, num_stocks, 
+        #                                             #   *target.shape[2:-1],
+        #                                                 1) # [num_timestamps * nsamples, num_stocks, 1]
+        # assert torch.all(preds_stocks_index[:, 0] == 0), "Stocks index should be 0 for all samples."
+        # assert torch.all(preds_stocks_index[:, 2] == 2), "Stocks index should be 2 for all samples."
+        # assert torch.all(preds_stocks_index[:, -1] == num_stocks - 1), f"Stocks index should be {num_stocks - 1} for all samples."
+
+        # # Split ygen into nsamples chunks and stack them across the last dimension
+        # preds = torch.stack(torch.chunk(preds, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, future_window, nsamples]
+
+        # preds_timestamps = timestamps_gen.reshape(-1, num_stocks, 
+        #                                          #   *target.shape[2:-1],
+        #                                             1) # [num_timestamps * nsamples, num_stocks, 1]
+        # preds_timestamps = torch.stack(torch.chunk(preds_timestamps, nsamples, dim = 0), dim = -1) # [num_timestamps, num_stocks, 1, nsamples]
+        # assert torch.all(preds_timestamps[0] == preds_timestamps[0, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[0, 0, 0, 0]} for all samples but it is {preds_timestamps[0]}."
+        # assert torch.all(preds_timestamps[2] == preds_timestamps[2, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[2, 0, 0, 0]} for all samples but it is {preds_timestamps[2]}."
+        # assert torch.all(preds_timestamps[-1] == preds_timestamps[-1, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[-1, 0, 0, 0]} for all samples but it is {preds_timestamps[-1]}."
+
+        # assert torch.all(preds_timestamps[3, 0] == preds_timestamps[3, 0, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 0, 0, 0]} for all samples but it is {preds_timestamps[3, 0]}."
+        # assert torch.all(preds_timestamps[3, 2] == preds_timestamps[3, 2, 0, 0]), f"Timestamps index should be {preds_timestamps[3, 2, 0, 0]} for all samples but it is {preds_timestamps[3, 2]}."
+        # assert torch.all(preds_timestamps[3, -1] == preds_timestamps[3, -1, 0, 0]), f"Timestamps index should be {preds_timestamps[3, -1, 0, 0]} for all samples but it is {preds_timestamps[3, -1]}."
+
+        # target.unsqueeze_(-1) # [num_timestamps, num_stocks, future_window, 1]
+        # assert preds.shape[:3] == target.shape[:3], f"Shape mismatch: {preds.shape} != {target.shape}"
+
+
+
+        error_dict = log_regression_errors(preds = preds,
+                                           target = target,
+                                           grw_pred=grw_pred,
+                                           cgrw_pred=None,
+                                           pred_log_returns=pred_log_returns,
+                                           target_log_returns=target_log_returns,
+                                           grw_pred_log_returns=grw_pred_log_returns,
+                                           cgrw_pred_log_returns=None,
+                                           target_metric = target_metric
+                                           )
+
+        eval_metrics.update(error_dict)
 
 
         plot_stocks_idx = np.random.choice(num_stocks, size = 4, replace = False)
+        plot_timestamps_idx = torch.randint(0, len(obs_and_pred_timestamps), size = (2,), device=obs_and_pred_timestamps.device)
 
-        eval_metrics.update(get_regression_errors(preds, target))
-        eval_metrics.update(log_plot_regression_errors(preds, target,
-                                                       metric = data.info["Target"] if isinstance(data.info["Target"], str) else data.info["Target"][0],
-                                                       stocks_idx=plot_stocks_idx)
-                                                       )
+        for stock_idx in plot_stocks_idx:
+            # accelerator.print(f"preds_timestamps for stock {stock_idx}: ", preds_timestamps[:, stock_idx, 0, 0])
+            # accelerator.print(f"Target.shape for stocks {stock_idx}: ", target[:, stock_idx, :, 0].shape)
+            
+            # target_column_idx = 1
+            # observations = data.x[:, target_column_idx, :].reshape(-1, num_stocks, past_window)
+            # future_window = target.shape[2]
+            # obs_and_pred_timestamps = torch.arange(-past_window, future_window, device = preds_timestamps.device).view(1, -1).repeat(num_timestamps, 1) # [num_timestamps, past_window + future_window]
+            # obs_and_pred_timestamps = obs_and_pred_timestamps + preds_timestamps[:, stock_idx, 0, 0].view(-1, 1) # Shift by the prediction start timestamp
 
-        # Pred and target are DailyLogReturns, map them to log returns
-        pred_log_returns = daily_log_returns_to_log_returns(preds)
-        target_log_returns = daily_log_returns_to_log_returns(target)
-        eval_metrics.update(log_plot_regression_errors(pred_log_returns, target_log_returns, metric = "Log returns", stocks_idx=plot_stocks_idx))
 
-        features_info = data.info['Features']
-        if isinstance(features_info, list) and isinstance(features_info[0], list):
-            features_info = features_info[0]
-            if 'Close' in features_info:
-                closing_prices_col_idx = features_info.index('Close')
-            else:
-                closing_prices_col_idx = 0
+            # ## Assert shifted observations match the target start and end values
+            # delta_obs_time = obs_and_pred_timestamps[1,0] - obs_and_pred_timestamps[0,0]
+            # print(f"Delta observation time: {delta_obs_time}")
+            # print("Observations[0:2, :]: ", observations[0:2, stock_idx, :])
+            # print("Target[0:2, stock]: ", target[0:2, stock_idx, :, 0])
 
-        # init_closing_prices = data.close_price_y.reshape(num_timestamps, num_stocks, -1)[:, :, 0] # [num_timestamps, num_stocks]
-        init_closing_prices = data.x[:, closing_prices_col_idx, -1]
+            
+            temp_dict = log_plot_regression(preds = preds[plot_timestamps_idx, stock_idx, :, :].detach().cpu(), 
+                                target = target[plot_timestamps_idx, stock_idx, :, 0].detach().cpu(), 
+                                observations = observations[plot_timestamps_idx, stock_idx].detach().cpu(),
+                                timestamps = obs_and_pred_timestamps[plot_timestamps_idx].detach().cpu(),
+                                metric = target_metric,
+                                stocks_idx = stock_idx,
+                                )
 
-        accelerator.print(f"Init closing prices: ", init_closing_prices)
-        init_closing_prices = init_closing_prices.reshape(num_timestamps, num_stocks).unsqueeze(-1).unsqueeze(-1) # [num_timestamps, num_stocks, 1, 1]
-        pred_closing_prices = daily_log_returns_to_closing_prices(preds, init_closing_prices = init_closing_prices)
-        target_closing_prices = daily_log_returns_to_closing_prices(target, init_closing_prices = init_closing_prices)
+            # eval_metrics.update({f"{k}-stock-{stock_idx}": v for k, v in temp_dict.items()})
+            eval_metrics.update(temp_dict)
 
-        eval_metrics.update(log_plot_regression_errors(pred_closing_prices, target_closing_prices, metric = "Closing prices", stocks_idx=plot_stocks_idx))
+
+            # # Get daily log returns and convert to log returns for plotting
+            # pred_log_returns = daily_log_returns_to_log_returns(preds[plot_timestamps_idx, stock_idx, :, :].detach().cpu(), time_dim = 1)
+            # target_log_returns = daily_log_returns_to_log_returns(target[plot_timestamps_idx, stock_idx, :, 0].detach().cpu(), time_dim = 1)
+            # observations_log_returns = daily_log_returns_to_log_returns(observations[plot_timestamps_idx, stock_idx].detach().cpu(), time_dim = 1)
+
+            # print("Pred log returns: ", pred_log_returns)
+            # print("Target log returns: ", target_log_returns)
+            # print("Observations log returns: ", observations_log_returns)
+
+
+            # target_log_returns = target_log_returns + observations_log_returns[:, -1].view(-1, 1)
+            # pred_log_returns = pred_log_returns + observations_log_returns[:, -1].view(-1, 1, 1)
+
+            temp_dict = log_plot_regression(preds = pred_log_returns[plot_timestamps_idx, stock_idx, :, :].detach().cpu(),
+                                target = target_log_returns[plot_timestamps_idx, stock_idx, :, 0].detach().cpu(),
+                                observations = observations_log_returns[plot_timestamps_idx, stock_idx].detach().cpu(),
+                                timestamps = obs_and_pred_timestamps[plot_timestamps_idx].detach().cpu(),
+                                metric = "Log returns",
+                                stocks_idx = stock_idx,
+                                )
+            eval_metrics.update({f"{k}_gdm": v for k, v in temp_dict.items()})
+
+
+        
+            ### Plot the GRW baselines ###
+            temp_dict = log_plot_regression(preds = grw_pred_log_returns[plot_timestamps_idx, stock_idx, :, :].detach().cpu(),
+                                target = target_log_returns[plot_timestamps_idx, stock_idx, :, 0].detach().cpu(),
+                                observations = observations_log_returns[plot_timestamps_idx, stock_idx].detach().cpu(),
+                                timestamps = obs_and_pred_timestamps[plot_timestamps_idx].detach().cpu(),
+                                metric = "Log returns",
+                                stocks_idx = stock_idx,
+                                )
+            eval_metrics.update({f"{k}_grw": v for k, v in temp_dict.items()})
+
+            
+            # temp_dict = log_plot_regression(preds = cgrw_pred_log_returns[plot_timestamps_idx, stock_idx, :, :].detach().cpu(),
+            #                     target = target_log_returns[plot_timestamps_idx, stock_idx, :, 0].detach().cpu(),
+            #                     observations = observations_log_returns[plot_timestamps_idx, stock_idx].detach().cpu(),
+            #                     timestamps = obs_and_pred_timestamps[plot_timestamps_idx].detach().cpu(),
+            #                     metric = "Log returns",
+            #                     stocks_idx = stock_idx,
+            #                     )
+            # eval_metrics.update({f"{k}_cgrw": v for k, v in temp_dict.items()})
+
+
+        # raise ValueError("Stopping here for debugging...")
+
+
+        # eval_metrics.update(log_plot_regression_errors(preds, target,
+        #                                                metric = data.info["Target"] if isinstance(data.info["Target"], str) else data.info["Target"][0],
+        #                                                stocks_idx=plot_stocks_idx,
+        #                                                segment_timestamps = False,
+        #                                                )
+        #                                                )
+
+        # # Pred and target are DailyLogReturns, map them to log returns
+        # target_log_returns = torch.flatten(torch.permute(target, (0, 2, 1, 3)), start_dim = 0, end_dim = 1) # [num_timestamps * future_window, num_stocks, 1]
+        # target_log_returns = daily_log_returns_to_log_returns(target_log_returns)
+        # target_log_returns = torch.permute(target_log_returns.reshape(num_timestamps, -1, num_stocks, 1), (0, 2, 1, 3)) # [num_timestamps, num_stocks, future_window, 1]
+
+        # pred_log_returns = daily_log_returns_to_log_returns(preds, time_dim = 2) # Take cumulative sum over prediction window
+        # pred_log_returns = pred_log_returns + target_log_returns[:, :, :1, :] - preds[:, :, :1, :] # Adjust the first log return to match the target's first log return
+
+        # # pred_log_returns = torch.flatten(torch.permute(preds, (0, 2, 1, 3)), start_dim = 0, end_dim = 1) # [num_timestamps * future_window, num_stocks, nsamples]
+        # # pred_log_returns = torch.permute(pred_log_returns.reshape(num_timestamps, -1, num_stocks, nsamples), (0, 2, 1, 3)) # [num_timestamps, num_stocks, future_window, nsamples]
+
+
+        # eval_metrics.update(log_plot_regression_errors(pred_log_returns, target_log_returns,
+        #                                                metric = "Log returns",
+        #                                                stocks_idx=plot_stocks_idx,
+        #                                                segment_timestamps = False
+        #                                                )
+        #                                                )
+
+        # features_info = data.info['Features']
+        # if isinstance(features_info, list) and isinstance(features_info[0], list):
+        #     features_info = features_info[0]
+        #     if 'Close' in features_info:
+        #         closing_prices_col_idx = features_info.index('Close')
+        #     else:
+        #         closing_prices_col_idx = 0
+
+        # init_closing_prices = data.x[:, closing_prices_col_idx, -1]
+
+        # accelerator.print(f"Init closing prices: ", init_closing_prices)
+        # init_closing_prices = init_closing_prices.reshape(num_timestamps, num_stocks).unsqueeze(-1).unsqueeze(-1) # [num_timestamps, num_stocks, 1, 1]
+        # pred_closing_prices = daily_log_returns_to_closing_prices(preds, init_closing_prices = init_closing_prices)
+        # target_closing_prices = daily_log_returns_to_closing_prices(target, init_closing_prices = init_closing_prices)
+
+        # eval_metrics.update(log_plot_regression_errors(pred_closing_prices, target_closing_prices, metric = "Closing prices", stocks_idx=plot_stocks_idx))
 
         return eval_metrics
 
@@ -409,7 +576,6 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
                 for batch_idx, data in enumerate(dataloader[phase]):
 
-
                     # #### Clone the graph data ####
                     # data = self.batch_from_data_list(data_list = [datum.clone() for _ in range(self.config.batch_size)],
                     #                                     exclude_keys=["close_price", "close_price_y", "stocks_index", "timestamp"],
@@ -458,6 +624,10 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                             # Predict the added noise (conditioning info is in the data object)
                             pred_noise = model(noisy_y_t, timesteps, data)
 
+                            # # Assert pred_noise does not contain NaNs or Infs
+                            # assert not torch.isnan(pred_noise).any(), "pred_noise contains {} many NaNs".format(torch.isnan(pred_noise).sum().item())
+                            # assert not torch.isinf(pred_noise).any(), "pred_noise contains {} many Infs".format(torch.isinf(pred_noise).sum().item())
+
                             # Compute the diffusion loss
                             all_loss_terms = self.loss_fn(pred_noise, eps).mean(dim = -1)
                             loss = all_loss_terms.mean()
@@ -470,7 +640,15 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                             else:
                                 loss.backward()
 
-                            accelerator.clip_grad_norm_(model.parameters(), max_norm=10.0)
+                            # Clip the gradients
+                            if self.config.grad_clipping_constant is not None:
+                                if self.config.clip_grad_by == 'norm':
+                                    accelerator.clip_grad_norm_(model.parameters(), max_norm=self.config.grad_clipping_constant)
+                                elif self.config.clip_grad_by == 'value':
+                                    accelerator.clip_grad_value_(model.parameters(), clip_value=self.config.grad_clipping_constant)
+                                else:
+                                    raise ValueError(f"Invalid clip_grad_by value: {self.config.clip_grad_by}. Choose 'norm' or 'value'.")
+
 
                             params = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
                             pgrad_norm = np.sqrt(np.sum([p.grad.norm().item()**2 for p in params]))
@@ -497,8 +675,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
                                 ##################### Training logic ##################### 
 
-                    if batch_idx >= 0:
-                        # We want to process single batch per epoch
+                    if batch_idx >= 2:
+                        # We want to process two batches per epoch
                         break
              
                 epoch_loss /= num_batches
@@ -528,9 +706,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
 
                     # Sample from the trained model and regress
-
                     for eval_phase in ["train-val", "val"]:
-                        nsamples = 2 # 10
+                        nsamples = 10 # 50
                         eval_metrics = self.eval(accelerator=accelerator, model = model, data = next(iter(dataloader[eval_phase])), nsamples = nsamples, device = device, sampler = "ddpm")
                         log_dict.update({f"{self.__class__.__name__}-Evaluation/{eval_phase}-{k}": v for k, v in eval_metrics.items()})
 

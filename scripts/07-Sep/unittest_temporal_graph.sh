@@ -9,8 +9,7 @@ SCRIPT="train"
 CUDA_VISIBLE_DEVICES=0 # Set this to the GPU you want to use, e.g., 0, 1, 2, etc.
 
 # group_name="17-Aug/100-nodes-graph-density-12-rmin-0.6"
-group_name="01-Sep/UnitTests"
-
+group_name="07-Sep/UnitTests-Temporal-Correlation-Graph"
 
 
 ################################ GENERAL CONFIG ################################
@@ -52,8 +51,6 @@ log_dataset=True
 
 
 
-
-
 ################################### ACCELERATOR CONFIG ###################################
 ##########################################################################################
 
@@ -73,10 +70,13 @@ auto_device_placement=False
 dataset_name="S&P 100"
 # data_dir="./SP100AnalysisWithGNNs/data/SP100/raw"
 data_dir="./datasets/raw"
-corr_threshold=0.7 # Thresholding for the correlation matrix
+train_dataset_fraction=0.9
+corr_threshold=0.6 # 0.7 Thresholding for the correlation matrix
 sector_bonus=0.05 # Bonus for stocks sharing the same sector
-past_window=25 # Past window of features including closing prices and daily log returns
-future_window=$past_window # Set these windows equal
+past_window=20 # 25 Past window of features including closing prices and daily log returns
+future_window=5 # 10 Set these windows equal =$past_window
+temporal_correlation_graph=True # False Whether to compute a temporal correlation graph and combine it with the existing graph.
+
 
 ################################################################################
 ################################ DATASET CONFIG ################################
@@ -88,24 +88,28 @@ future_window=$past_window # Set these windows equal
 
 gnn_backbone_diffusion="resplus-gnn"
 ###############################
-lr_diffusion=1e-3 # 1e-2
-weight_decay_diffusion=1e-4 # 1e-4
-lr_sched_gamma_diffusion=0.8 # 0.5 # 0.9
-pgrad_clipping_constant_diffusion=10.0
+lr_diffusion=1e-2 # 1e-2
+weight_decay_diffusion=1e-6 # 1e-4
+lr_sched_gamma_diffusion=0.99 # 0.5 # 0.9
+grad_clipping_constant_diffusion=10.0
+clip_grad_by_diffusion="value" # "value" # "norm"
 ###############################
-n_layers_diffusion=6 # 4
-k_hops_diffusion=2
+n_layers_diffusion=6 # 6
+k_hops_diffusion=2 # 2
 norm_layer_diffusion="graph" # "batch"
 layer_norm_mode_diffusion="node"
-conv_layer_normalize_diffusion=True # GCN normalization applied to the graph.
+conv_layer_normalize_diffusion=False # GCN normalization applied to the graph.
+aggr_list_diffusion="mean, max, min" # "add,mean,max" # List of aggregation methods to use (e.g., "add,mean,max"). If None, the default aggregation of the convolution layer is used.
+conv_batch_norm_diffusion=True # Whether batch norm is applied in each GNN layer following the GConv.
 dropout_rate_diffusion=0.2
 ###############################
-hidden_dim_diffusion=64 # 128
+hidden_dim_diffusion=128 # 128
 ###############################
-x_batch_size_diffusion=50 # 5000
-diffuse_n_samples_diffusion=500
+x_batch_size_diffusion=32 # 64
+diffuse_n_samples_diffusion=500 # 500
 sampler_diffusion="ddpm"
-batch_size_diffusion=10
+batch_size_diffusion=10 # 10
+edge_features_nb=2
 
 ###########################################################################
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
@@ -117,12 +121,11 @@ load_cd_train_chkpt_path_diffusion="none" # "Power-Allocation-GDM-Experiments/09
 
 # num_graphs=80 # 32
 MAX_EFFECTIVE_BATCH_SIZE_DIFFUSION=200
-EFFECTIVE_TRAINING_STEPS=500000 #100000
+EFFECTIVE_TRAINING_STEPS=1000000 #100000
 # CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=$(expr 100 / $MAX_JOBS)
 
 norm_layer_diffusion_values=("layer")
 batch_size_diffusion_values=($batch_size_diffusion)
-
 
 process_counter=0
 for batch_size_diffusion in "${batch_size_diffusion_values[@]}"; do
@@ -157,8 +160,11 @@ for batch_size_diffusion in "${batch_size_diffusion_values[@]}"; do
                                                                   --log_dataset=$log_dataset \
                                                                   --gradient_accumulation_steps=$gradient_accumulation_steps --sync_with_dataloader=$False --split_batches=$True --sync_each_batch=$sync_each_batch --auto_device_placement=$auto_device_placement \
                                                                   --dataset_name="${dataset_name}" --data_dir="${data_dir}" \
+                                                                  --train_dataset_fraction=$train_dataset_fraction \
                                                                   --corr_threshold=$corr_threshold --sector_bonus=$sector_bonus \
                                                                   --past_window=$past_window --future_window=$future_window \
+                                                                  --temporal_correlation_graph=$temporal_correlation_graph \
+                                                                  --edge_features_nb_diffusion=$edge_features_nb \
                                                                   --load_cd_train_chkpt_path_diffusion="${load_cd_train_chkpt_path_diffusion}" \
                                                                   --gnn_backbone_diffusion="${gnn_backbone_diffusion}" \
                                                                   --batch_size_diffusion=$batch_size_diffusion \
@@ -167,8 +173,9 @@ for batch_size_diffusion in "${batch_size_diffusion_values[@]}"; do
                                                                   --lr_diffusion=$lr_diffusion --weight_decay_diffusion=$weight_decay_diffusion --lr_sched_gamma_diffusion=$lr_sched_gamma_diffusion \
                                                                   --hidden_dim_diffusion=$hidden_dim_diffusion --n_layers_diffusion=$n_layers_diffusion --k_hops_diffusion=$k_hops_diffusion \
                                                                   --n_epochs_diffusion=$n_epochs_diffusion \
-                                                                  --pgrad_clipping_constant_diffusion=$pgrad_clipping_constant_diffusion \
-                                                                  --norm_layer_diffusion="${norm_layer_diffusion}" --layer_norm_mode_diffusion="${layer_norm_mode_diffusion}" --conv_layer_normalize_diffusion=$conv_layer_normalize_diffusion \
+                                                                  --grad_clipping_constant_diffusion=$grad_clipping_constant_diffusion --clip_grad_by_diffusion="${clip_grad_by_diffusion}" \
+                                                                  --norm_layer_diffusion="${norm_layer_diffusion}" --layer_norm_mode_diffusion="${layer_norm_mode_diffusion}" \
+                                                                  --conv_batch_norm_diffusion=$conv_batch_norm_diffusion --aggr_list_diffusion="${aggr_list_diffusion}" --conv_layer_normalize_diffusion=$conv_layer_normalize_diffusion \
                                                                   --dropout_rate_diffusion=$dropout_rate_diffusion  --pool_ratio_diffusion=0.8 --apply_gcn_norm_diffusion=$True &
 
                                                             

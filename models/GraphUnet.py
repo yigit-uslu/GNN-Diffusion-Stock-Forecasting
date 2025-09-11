@@ -1,18 +1,32 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, TopKPooling, TAGConv, LEConv, GATv2Conv, BatchNorm, LayerNorm, DiffGroupNorm, GraphNorm, InstanceNorm, GraphUNet
+from torch_geometric.nn import GCNConv, TopKPooling, TAGConv, LEConv, GATv2Conv, BatchNorm, LayerNorm, DiffGroupNorm, GraphNorm, InstanceNorm, MultiAggregation
+from torch_geometric.typing import OptTensor
 from typing import Callable, List, Union
 from torch_geometric.utils.repeat import repeat
 import torch.utils.checkpoint as checkpoint
 from torch_geometric.nn.conv.gcn_conv import gcn_norm
-from core.config import SINUSOIDAL_TIME_EMBED_MAX_T
+
+from models.ConvLayers import ConvLayer, AttnLayer
+from models.NormLayers import NormLayer
+from models.EmbeddingLayers import SinusoidalTimeEmbedding
+
 
 from torch_geometric.utils import (
     add_self_loops,
     remove_self_loops,
     to_torch_csr_tensor,
 )
+
+    
+
+    
+
+    # def reset_parameters(self):
+    #     # self.edge_mlp.reset_parameters()
+    #     super().reset_parameters()
+
 
 # # MLP-based model
 # class MLP(nn.Module):
@@ -106,121 +120,9 @@ class Swish(nn.Module):
 
     def forward(self, x):
         return x * torch.sigmoid(x)
-    
-
-class NormLayer(nn.Module):
-    def __init__(self, norm, in_channels, **kwargs):
-        super().__init__()
-        self.norm = norm
-        self.in_channels = in_channels
-        self.n_groups = kwargs.get('n_groups', 8)
-        self.resolve_norm_layer(norm = self.norm, in_channels=in_channels, **kwargs)
-
-
-    def resolve_norm_layer(self, norm, in_channels, **kwargs):
-        n_groups = kwargs.get('n_groups', 8)
-        layer_norm_mode = kwargs.get('layer_norm_mode', 'node')
-
-        assert layer_norm_mode in ['node', 'graph'], f"Layer norm mode should be either 'node' or 'graph'. Got {layer_norm_mode}."
-
-        if norm == 'batch':
-            self.norm_layer = BatchNorm(in_channels)
-        elif norm == 'layer':
-            self.norm_layer = LayerNorm(in_channels, mode=layer_norm_mode)
-        elif norm == 'group':
-            self.norm_layer = DiffGroupNorm(in_channels=in_channels, groups=n_groups)
-        elif norm == 'graph':
-            self.norm_layer = GraphNorm(in_channels=in_channels)
-        elif norm == 'instance':
-            self.norm_layer = InstanceNorm(in_channels=in_channels)
-        elif norm == 'none' or norm is None:
-            self.norm_layer = nn.Identity()
-
-        print(f"Norm layer initialized with {self.norm_layer}")
-
-
-    def forward(self, x, batch = None, batch_size = None):
-        if self.norm in ['batch', 'group', 'none', None]:
-            return self.norm_layer(x)
-        elif self.norm in ['graph', 'layer', 'instance']:
-            # print('x.shape: ', x.shape)
-            # print('batch.shape: ', batch.shape)
-            return self.norm_layer(x, batch = batch, batch_size = None)
-        
-
-        else:
-            raise NotImplementedError
-    
-
-class SinusoidalTimeEmbedding(nn.Module):
-    """
-    https://nn.labml.ai/diffusion/ddpm/unet.html 
-    """
-    def __init__(self, n_channels: int):
-        super().__init__()
-        self.n_channels = n_channels
-        # self.act = Swish()
-        self.act = nn.LeakyReLU()
-
-        self.lin_embed = nn.Sequential(nn.Flatten(start_dim=-2),
-                                       nn.Linear(self.n_channels // 4, self.n_channels),
-                                       self.act,
-                                       nn.Linear(self.n_channels, self.n_channels)
-                                       )
-        
-    def forward(self, t: torch.Tensor):
-        half_dim = self.n_channels // 8
-        emb = torch.log(torch.Tensor([SINUSOIDAL_TIME_EMBED_MAX_T])) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device = t.device) * -emb.to(t.device))
-        emb = t.unsqueeze(-1) * emb.unsqueeze(0)
-        emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim = -1)
-
-        emb = self.lin_embed(emb)
-        return emb
-    
-
-class ConvLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, **kwargs):
-        super().__init__()
-
-        architecture = kwargs.get('architecture', 'GCNConv')
-        k_hops = kwargs.get('k_hops', 2)
-        normalize = kwargs.get('normalize', False)
-        add_self_loops = kwargs.get('add_self_loops', True)
-
-        if architecture == 'TAGConv':
-            self.conv_layer = TAGConv(in_channels=in_channels, out_channels=out_channels, K=k_hops, normalize = normalize)
-            print(f"TAGConv is initialized with F_l={in_channels}, F_(l+1)={out_channels}, K_hops = {k_hops}, normalization = {normalize}.")
-        elif architecture == 'LEConv':
-            self.conv_layer = LEConv(in_channels=in_channels, out_channels=out_channels)
-        elif architecture == 'GCNConv':
-            self.conv_layer = GCNConv(in_channels=in_channels, out_channels=out_channels,
-                                      improved=True, add_self_loops=add_self_loops, normalize=normalize if add_self_loops is False else True)
-        else:
-            raise ValueError
-    
-    def forward(self, x, edge_index, edge_weight, batch = None):
-        x = self.conv_layer(x, edge_index = edge_index, edge_weight = edge_weight)
-        return x
-    
 
     
 
-class AttnLayer(nn.Module):
-    def __init__(self, in_channels, out_channels, num_attn_heads = 4, **kwargs):
-        super().__init__()
-        self_loop_fill_value = kwargs.get('self_loop_fill_value', "max")
-        self.attn_layer = GATv2Conv(in_channels=in_channels,
-                                    out_channels=out_channels // num_attn_heads,
-                                    heads=num_attn_heads, concat=True,
-                                    edge_dim=1,
-                                    add_self_loops=True,
-                                    fill_value=self_loop_fill_value # "mean"
-                                    )
-    
-    def forward(self, x, edge_index, edge_weight, batch = None):
-        x = self.attn_layer(x, edge_index = edge_index, edge_attr = edge_weight.unsqueeze(-1), return_attention_weights = None)
-        return x
     
 
 

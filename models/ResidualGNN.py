@@ -1,6 +1,8 @@
 import torch 
 import torch.nn as nn
-from models.GraphUnet import ConvLayer, NormLayer, SinusoidalTimeEmbedding
+from models.ConvLayers import ConvLayer
+from models.NormLayers import NormLayer
+from models.EmbeddingLayers import SinusoidalTimeEmbedding
 from torch.utils.checkpoint import checkpoint
 
 import torch_geometric.nn as pyg_nn
@@ -32,15 +34,19 @@ class ResidualLayer(nn.Module):
         in_channels: int,
         out_channels: int,
         conv_architecture: str = "TAGConv",
+        edge_dim: int = 1,
         k_hops: int = 2,
         norm: str = "batch",
         mlp: Optional[nn.Module] = None,
         act: Optional[nn.Module] = nn.LeakyReLU(),
         res_connection: str = 'res+',
         dropout: float = 0.,
+        normalize: bool = False,
         norm_kws: Optional[dict] = None,
         use_checkpointing: bool = False,
-        return_norms: bool = False
+        return_norms: bool = False,
+        aggr_list: Optional[list] = None,
+        conv_batch_norm: bool = False
     ):
         super().__init__()
 
@@ -49,7 +55,7 @@ class ResidualLayer(nn.Module):
 
         self.k_hops = k_hops
         self.conv_architecture = conv_architecture
-        assert self.conv_architecture in ['LeConv', 'TAGConv', 'GCN']
+        assert self.conv_architecture in ['LeConv', 'TAGConv', 'GCN', 'MultiEdgeTAGConv'], f"Unknown conv architecture: {self.conv_architecture}"
         self.norm = norm
         assert self.norm in ['batch', 'group', 'graph', 'layer', 'none', 'instance']
         self.act = act
@@ -66,8 +72,11 @@ class ResidualLayer(nn.Module):
         ### Initialize the convolution layer
         self.conv = ConvLayer(in_channels=in_channels, out_channels=out_channels,
                               architecture = self.conv_architecture, k_hops=self.k_hops,
-                              normalize = False,
-                              add_self_loops = False
+                              normalize = normalize,
+                              add_self_loops = False,
+                              edge_dim = edge_dim,
+                              aggr_list = aggr_list,
+                              conv_batch_norm = conv_batch_norm
                               )
             
         self.mlp = nn.Identity() if self.mlp is None else self.mlp
@@ -179,10 +188,16 @@ class ResidualGNN(nn.Module):
         self.use_res_connection_time_embed = kwargs.get("use_res_connection_time_embed", False)
         self.time_embed_strategy = kwargs.get("time_embed_strategy", "add")
         self.use_checkpointing = kwargs.get("use_checkpointing", False)
+        edge_features_nb = kwargs.get("edge_features_nb", 1)
+        aggr_list = kwargs.get("aggr_list", None)
+        conv_batch_norm = kwargs.get("conv_batch_norm", False)
 
         self.activation = nn.LeakyReLU(inplace=True)
         self.norm = norm
         conv_architecture = kwargs.get("conv_model", "TAGConv")
+
+        if edge_features_nb > 1:
+            conv_architecture = "MultiEdge" + conv_architecture
 
         # self.x_embed = nn.Linear(in_channels, hidden_channels // 4)
         self.x_embed = nn.Linear(in_channels, hidden_channels)
@@ -196,15 +211,18 @@ class ResidualGNN(nn.Module):
         self.res_conv_layers.append(ResidualLayer(in_channels=self.x_embed.out_features,
                                                 #   in_channels=hidden_channels // 4,
                                                   out_channels=hidden_channels,
-                                                  conv_architecture=conv_architecture,
+                                                  conv_architecture=conv_architecture, edge_dim=edge_features_nb,
                                                   k_hops=self.k_hops,
                                                   norm=self.norm,
                                                   norm_kws=kwargs.get("norm_kws", dict()),
                                                   mlp=pyg_mlp(channel_list = [hidden_channels, 4 * hidden_channels, hidden_channels], act = self.activation),
                                                   res_connection=self.res_connection,
                                                   dropout=self.dropout_rate, # 0.0,
+                                                  normalize=self.conv_layer_normalize,
                                                   use_checkpointing=self.use_checkpointing,
-                                                  return_norms=False
+                                                  return_norms=False,
+                                                  aggr_list=aggr_list,
+                                                  conv_batch_norm=conv_batch_norm
                                                   )
                                     )
         
@@ -220,14 +238,16 @@ class ResidualGNN(nn.Module):
 
             res_conv_layer = ResidualLayer(in_channels=hidden_channels,
                                            out_channels=hidden_channels,
-                                           conv_architecture=conv_architecture,
+                                           conv_architecture=conv_architecture, edge_dim=edge_features_nb,
                                            k_hops=self.k_hops,
                                            norm=self.norm,
                                            norm_kws=kwargs.get("norm_kws", dict()),
                                            mlp=pyg_mlp(channel_list = [hidden_channels, 4 * hidden_channels, hidden_channels], act = self.activation),
                                            res_connection=self.res_connection,
                                            dropout=self.dropout_rate, # 0.0,
-                                           use_checkpointing=self.use_checkpointing
+                                           use_checkpointing=self.use_checkpointing,
+                                           aggr_list=aggr_list,
+                                           conv_batch_norm=conv_batch_norm
                                            ) 
 
             self.res_conv_layers.append(res_conv_layer)

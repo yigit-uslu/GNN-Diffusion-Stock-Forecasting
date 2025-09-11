@@ -283,6 +283,7 @@ def make_parser(parse_known_args=False):
     dataset_args.add_argument('--future_window', type=int, default=1, help = 'Number of future time steps to predict.')
     dataset_args.add_argument('--target_column_name', type=str, default="DailyLogReturn", help = 'Name of the target column to predict.' + \
     f'Dataset S&P 100: {get_column_names(values_path_or_df = "./SP100AnalysisWithGNNs/data/SP100/raw/values.csv")}')
+    dataset_args.add_argument('--temporal_correlation_graph', type=str2bool, default=False, help = 'Whether to compute a temporal correlation graph and combine it with the existing graph.')
     dataset_args.add_argument('--train_dataset_fraction', type=float, default=0.7, help = 'Fraction of the dataset to use for training.')
 
 
@@ -295,7 +296,8 @@ def make_parser(parse_known_args=False):
     CD_args.add_argument('--batch_size_diffusion', type = int, default=64, help = 'Batch size for number of distinct graphs in a batch.') # 4
     CD_args.add_argument('--x_batch_size_diffusion', type = int, default=500, help = 'Batch size for number of node signals per graph in a batch.') # 1000
     CD_args.add_argument('--n_epochs_diffusion', type = int, default=5000, help = 'Number of training epochs.') # 2000
-    CD_args.add_argument('--pgrad_clipping_constant_diffusion', type = float, default=1., help = 'Clip the norm of the gradients.')
+    CD_args.add_argument('--grad_clipping_constant_diffusion', type = float, default=1., help = 'Clip value for the gradients.')
+    CD_args.add_argument('--clip_grad_by_diffusion', type = str, default='norm', choices=['norm', 'value'], help = 'Choose whether to clip gradients by norm or value.')
     CD_args.add_argument('--beta_schedule_diffusion', type = str, default='cosine', choices = ['linear', 'cosine'], help = 'Noise schedule.')
     CD_args.add_argument('--diffusion_steps_diffusion', type = int, default=500, help = 'Number of dffusion steps.')
     CD_args.add_argument('--diffuse_n_samples_diffusion', type = int, default=500, help = 'Number of dffusion steps.')
@@ -306,10 +308,11 @@ def make_parser(parse_known_args=False):
 
     ### Diffusion model architecture parameters ###
     CD_model_args = parser.add_argument_group(title='CD-model', description='Config args for conditional diffusion model neural network model.')
-    CD_model_args.add_argument('--model_diffusion', type = str, default='LeConv', choices = ['LeConv', 'TAGConv'], help = 'Conv. Model architecture.')
+    CD_model_args.add_argument('--edge_features_nb_diffusion', type = int, default=1, help = 'Number of features per edge.')
+    CD_model_args.add_argument('--model_diffusion', type = str, default='TAGConv', choices = ['LeConv', 'TAGConv'], help = 'Conv. Model architecture.')
     CD_model_args.add_argument('--sinusoidal_time_embed_diffusion', type = str2bool, default=True, help = 'Choose whether sinusoidal time embeddings are used.')
     CD_model_args.add_argument('--use_res_connection_time_embed_diffusion', type = str2bool, default=True, help = 'Choose whether sinusoidal time embeddings are fed to every layer via residual connections.')
-    CD_model_args.add_argument('--gnn_backbone_diffusion', type = str, default='gnn-unet', choices = ['gnn', 'simple-gnn', 'resplus-gnn', 'mlp-conditional-gnn', 'mlp-conditional-mlp', 'gnn-conditional-gnn', 'gnn-unet', 'mlp-conditional-graph-transformer', 'graph-transformer-conditional-mlp', 'graph-transformer'], help = 'GNN backbone architectures.')
+    CD_model_args.add_argument('--gnn_backbone_diffusion', type = str, default='gnn-unet', choices = ['gnn', 'simple-gnn', 'resplus-gnn', 'temporal-resplus-gnn', 'mlp-conditional-gnn', 'mlp-conditional-mlp', 'gnn-conditional-gnn', 'gnn-unet', 'mlp-conditional-graph-transformer', 'graph-transformer-conditional-mlp', 'graph-transformer'], help = 'GNN backbone architectures.')
     CD_model_args.add_argument('--load_model_chkpt_path_diffusion', type = none_or_str, default=None, help = 'Pre-trained model weights load path.') # pre-trained model weights load
     CD_model_args.add_argument('--load_cd_train_chkpt_path_diffusion', type = none_or_str, default=None, help = 'Path to the checkpoint for the CD training.')    
     CD_model_args.add_argument('--n_layers_diffusion', type = int, default=4, help = 'Num of gnn backbone blocks.')
@@ -317,13 +320,15 @@ def make_parser(parse_known_args=False):
     CD_model_args.add_argument('--hidden_dim_diffusion', type = int, default=64, help = 'Num of features in each layer of a GNN block.')
     CD_model_args.add_argument('--batch_norm_diffusion', type = str2bool, default=True, help = 'Batch normalization in GNN layers.')
     CD_model_args.add_argument('--dropout_rate_diffusion', type = float, default=0.0, help = 'Dropout rate for regularization in GNN layers.')
+    CD_model_args.add_argument('--conv_layer_normalize_diffusion', type = str2bool, default=False, help = 'Whether GCN norm is applied to the graph before message-passing.')
+    CD_model_args.add_argument('--conv_batch_norm_diffusion', type = str2bool, default=False, help = 'Whether batch norm is applied in each GNN layer following the GConv.')
     CD_model_args.add_argument('--k_hops_diffusion', type = int, default=2, help = 'If applicable, the k-hop neighborhoods are considered for aggregation in each GNN layer.')
+    CD_model_args.add_argument('--aggr_list_diffusion', type=str2strlist, default=None, help = 'List of aggregation methods to use (e.g., "add,mean,max"). If None, the default aggregation of the convolution layer is used.')
     CD_model_args.add_argument('--condition_by_summation_weight_diffusion', type = float, default=None, help = 'If None, conditioning is done by multiplying signal embeddings with time embeddings. If not None, final embedding is the weighted sum of signal embedding with weighted time and any conditioning graph embedding.')
     CD_model_args.add_argument('--use_checkpointing_diffusion', type = str2bool, default=False, help = 'Use gradient checkpointing to run a forward-pass segment for each checkpointed segment during backward propagation (GraphTransformer only)')
     CD_model_args.add_argument('--res_connection_diffusion', type = str, default='skip', choices=['mlp', 'skip'], help = 'Type of residual connection (GraphTransfromer only)')
     CD_model_args.add_argument('--norm_layer_diffusion', type = str, default=None, choices=[None, 'batch', 'layer', 'graph', 'instance', 'group'], help = 'Type of normalization layer (GraphUNet only)')
     CD_model_args.add_argument('--layer_norm_mode_diffusion', type = str, default="node", choices = ['node', 'graph'], help = 'Mode of operation if layer normalization is used.')
-    CD_model_args.add_argument('--conv_layer_normalize_diffusion', type = str2bool, default=False, help = 'If True, apply spectral normalization to edge weights in convolutional layers.')
     CD_model_args.add_argument('--pool_layer_diffusion', type = str, default='topk', choices=['topk', 'spectral', 'centrality'], help = 'Type of pooling layer (GraphUNet only)')
     CD_model_args.add_argument('--pool_ratio_diffusion', type = float, default=0.5, help = 'Pooling ratio.')
     CD_model_args.add_argument('--pool_multiplier_diffusion', type = float, default=1., help = 'Post-multiply pooled features to rescale them.')

@@ -1,8 +1,10 @@
 import os 
+from matplotlib import pyplot as plt
 import pandas as pd 
 import numpy as np 
 import networkx as nx
 from typing import Tuple
+import seaborn as sns
 
 from utils.graph_utils import draw_stocks_graph_by_correlation, draw_stocks_graph_by_sector, draw_merged_stocks_graph
 from utils.plot_utils import plot_stock_correlation_distribution
@@ -46,11 +48,10 @@ def compute_stocks_correlation_graph(fundamentals, save_dir, save_ext = ".pdf", 
 
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
-        save_path = f"{save_dir}/S&P_100_stocks_graph_by_correlation" + save_ext
+        save_path = f"{save_dir}/S&P_100_stocks_graph_by_correlation_thresh_{corr_threshold}" + save_ext
         draw_stocks_graph_by_correlation(fundamentals_corr_graph, save_path)
 
     return fundamentals_corr_np, fundamentals_corr_graph
-
 
 
 
@@ -79,6 +80,50 @@ def merge_stock_relation_graphs(fundamentals_corr_np, stocks, save_dir, save_ext
     # plt.show()
 
     return adj, graph
+
+
+
+def stack_stock_relation_graphs(adj_list, stocks, save_dir, save_ext) -> Tuple[np.ndarray, nx.Graph]:
+    """ 
+    Stack all the graphs to obtain a multi-feature adjacency matrix.
+    Note that the adjacency matrix is already thresholded here.
+    """
+
+    stacked_adj = np.zeros((*adj_list[0].shape, len(adj_list)))
+    for i, adj in enumerate(adj_list):
+        assert adj.shape[0] == adj.shape[1], "Adjacency matrix must be square."
+
+        adj = adj / abs(adj).max()
+        stacked_adj[..., i] = adj
+
+    stacked_graph = [nx.from_numpy_array(stacked_adj[..., i]) for i in range(stacked_adj.shape[-1])]
+
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+
+        with sns.axes_style("darkgrid"):
+            fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+            node_pos = nx.spring_layout(stacked_graph[0], k=.5 * len(stacked_graph))
+            for G, color, edge_style in zip(stacked_graph,
+                                            ['skyblue', 'lightgreen', 'lightcoral', 'orange', 'violet', 'lightgrey'][:len(stacked_graph)],
+                                            edge_styles := ['arc3,rad=0.1', 'arc3,rad=-0.1', 'arc3,rad=0.2', 'arc3,rad=-0.2', 'arc3,rad=0.3', 'arc3,rad=-0.3'][:len(stacked_graph)]):
+                
+                nx.draw_networkx_edges(G, node_pos, edge_color=color, width=1 / len(stacked_graph),
+                                    #    connectionstyle=edge_style
+                                       )
+                nx.draw_networkx_nodes(G, node_pos, node_size=500 // np.sqrt(len(stacked_graph)), node_color='skyblue')
+            
+            # Optionally, draw labels only once
+            nx.draw_networkx_labels(stacked_graph[0], pos=node_pos,
+                                    labels=dict(enumerate(stocks.index)),
+                                    font_size=6, font_color='black', font_weight='bold')
+            ax.grid(True)
+            
+            save_path = f"{save_dir}/S&P_100_stocks_stacked_graph" + save_ext
+            plt.savefig(save_path, dpi = 300, bbox_inches='tight')
+            plt.close(fig)
+    
+    return stacked_adj, stacked_graph
 
 
     

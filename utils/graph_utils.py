@@ -76,7 +76,7 @@ def draw_stocks_graph_by_sector(stocks_graph, save_path):
     with sns.axes_style("darkgrid"):
         fig, ax = plt.subplots(figsize=(12, 5))
 
-        nx.draw(stocks_graph, ax=ax, with_labels=True, node_size=500, node_color='skyblue', font_size=8, font_weight='bold', font_color='black', pos=nx.spring_layout(stocks_graph, k=.5))
+        nx.draw(stocks_graph, ax=ax, with_labels=True, node_size=500, node_color='skyblue', font_size=8, font_weight='bold', font_color='black', pos=nx.spring_layout(stocks_graph, k=0.4))
         ax.set_title('Stocks Graph by Sector')
         ax.grid(True)
 

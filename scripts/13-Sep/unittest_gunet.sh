@@ -9,7 +9,7 @@ SCRIPT="train"
 CUDA_VISIBLE_DEVICES=0 # Set this to the GPU you want to use, e.g., 0, 1, 2, etc.
 
 # group_name="17-Aug/100-nodes-graph-density-12-rmin-0.6"
-group_name="11-Sep/UnitTests-Temporal-Correlation-Graph"
+group_name="13-Sep/UnitTests-GUNet"
 
 
 ################################ GENERAL CONFIG ################################
@@ -86,15 +86,15 @@ temporal_correlation_graph=True # False Whether to compute a temporal correlatio
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
 ###########################################################################
 
-gnn_backbone_diffusion="temporal-resplus-gnn"
+gnn_backbone_diffusion="gnn-unet"
 ###############################
-lr_diffusion=2e-3 # 1e-2
-weight_decay_diffusion=1e-4 # 1e-4
+lr_diffusion=1e-2 # 1e-2 
+weight_decay_diffusion=1e-5 # 1e-4
 lr_sched_gamma_diffusion=0.99 # 0.5 # 0.9
 grad_clipping_constant_diffusion=10.0
 clip_grad_by_diffusion="value" # "value" # "norm"
 ###############################
-n_layers_diffusion=4 # 6
+n_layers_diffusion=3 # 6
 k_hops_diffusion=2 # 2
 norm_layer_diffusion="graph" # "batch"
 layer_norm_mode_diffusion="node"
@@ -105,11 +105,11 @@ dropout_rate_diffusion=0.2
 ###############################
 hidden_dim_diffusion=128 # 128
 ###############################
-x_batch_size_diffusion=64 # 64
+x_batch_size_diffusion=100 # 64
 diffuse_n_samples_diffusion=500 # 500
 sampler_diffusion="ddpm"
 batch_size_diffusion=1 # 10
-edge_features_nb=2
+edge_features_nb=2 # 2
 
 ###########################################################################
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################

@@ -60,6 +60,89 @@ def get_graph_in_pyg_format(values_path: str, adj_path: Union[str, list[str]],
 	print(f"Graph loaded with {nodes_nb} nodes, {edge_nb} edges with {edge_weight.shape[1]} features per edge, {x.shape[1]} features per node, {x.shape[2]} timestamps per node.")
 	edge_weight = edge_weight.squeeze(1) # (edge_nb,) if edge_weight.shape[1] == 1 else (edge_nb, edge_features_nb)
 
+
+	# Compute node degrees using edge_index and edge_weight
+	adj = to_dense_adj(edge_index, edge_attr=edge_weight, max_num_nodes=nodes_nb).squeeze(0)
+	orig_degrees = adj.abs().sum(dim=1)  # Sum of absolute weights of edges connected to each node
+	orig_degrees = orig_degrees.sum(dim=1) if edge_weight.ndim == 2 else orig_degrees
+	
+	degrees = orig_degrees.clone()
+	print("Original node degrees:", degrees.tolist())
+	# unsorted_indices = range(len(degrees))
+	depth = 4
+
+	sorted, indices = torch.sort(degrees, descending=True)
+	selected_node_indices = indices[:(len(indices) // 2)]
+	selected_node_degrees = sorted[:(len(indices) // 2)]
+
+	all_selected_nodes = [selected_node_indices]
+	all_selected_degrees = [selected_node_degrees]
+
+	selection_matrix = torch.zeros((len(sorted), len(selected_node_indices)), dtype=torch.long)
+	for col, node in enumerate(selected_node_indices):
+		selection_matrix[node, col] = 1
+
+	selection_matrix = selection_matrix.detach().cpu().numpy()
+	np.save(f"./datasets/raw/node_selection_matrices/C_{nodes_nb}_{len(selected_node_indices)}.npy", selection_matrix)
+
+    # num_nodes = len(degrees)
+	# all_selection_matrices = []
+	# all_selected_nodes = []
+	# all_selected_degrees = []
+
+	# for _ in range(depth):
+	# 	sorted, indices = torch.sort(degrees, descending=True)
+	# 	selected_node_indices = indices[:(len(indices) // 2)]
+	# 	selected_node_degrees = sorted[:(len(indices) // 2)]
+
+	# 	for idx in selected_node_indices:
+	# 		degrees[idx] = -1  # Mark selected nodes with -1 to exclude them in the next iteration
+
+	# 	all_selected_nodes.append(selected_node_indices)
+	# 	all_selected_degrees.append(selected_node_degrees)
+
+
+	# sorted_indices = torch.argsort(degrees, descending=True)
+	# selected_nodes = sorted_indices[:(len(sorted_indices) // 2)]
+	# selected_degrees = degrees[selected_nodes]
+
+	# # Create a nodes_nb x len(selected_nodes) selection matrix
+	# selection_matrix = torch.zeros((len(sorted_indices), len(selected_nodes)), dtype=torch.float32)
+	# for col, node in enumerate(selected_nodes):
+	# 	selection_matrix[node, col] = 1.0
+
+	# 	# Remove selected nodes from degrees
+	# 	degrees = 
+
+	# all_selection_matrices.append(selection_matrix)
+	# all_selected_nodes.append(selected_nodes)
+	# all_selected_degrees.append(selected_degrees)
+
+
+	# for _ in range(depth):
+	# 	sorted_indices = torch.argsort(degrees, descending=True)
+	# 	selected_nodes = sorted_indices[:(len(sorted_indices) // 2)]
+
+	# 	# Create a nodes_nb x len(selected_nodes) selection matrix
+	# 	selection_matrix = torch.zeros((len(sorted_indices), len(selected_nodes)), dtype=torch.float32)
+	# 	for col, node in enumerate(selected_nodes):
+	# 		selection_matrix[node, col] = 1.0
+
+	# 	all_selection_matrices.append(selection_matrix)
+	# 	all_selected_nodes.append(selected_nodes)
+	# 	unsorted_indices = sorted_indices[(len(sorted_indices) // 2):]
+
+	# 	selected_degrees = degrees[selected_nodes]
+	# 	all_selected_degrees.append(selected_degrees)
+
+	# 	unsorted_indices = torch.sort(unsorted_indices).values
+	# 	degrees = orig_degrees[unsorted_indices]
+
+	for nodes, degrees in zip(all_selected_nodes, all_selected_degrees):
+		print("*********************************\n\n\nNext set of nodes\n\n\n********************************")
+		for node, degree in zip(nodes, degrees):
+			print(f"Node {node.item()}: Degree {degree.item()}")
+
 	info_dict = {"Features": values.drop(columns=["Close"]).columns.tolist(),
 			  		"Target": target_column_name,
 				  	"Num_nodes": nodes_nb

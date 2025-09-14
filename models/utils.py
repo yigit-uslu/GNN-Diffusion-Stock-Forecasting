@@ -3,6 +3,7 @@ import torch
 import matplotlib.pyplot as plt
 import wandb
 from PIL import Image
+from models.StockForecastGNN_UNet import StockForecastDiffusionGUNet
 from models.StockForecastGNN import StockForecastDiffusionGNN
 from models.StockForecastTemporalConvGNN import StockForecastDiffusionTemporalConvGNN
 from models.eval import get_probabilistic_errors, get_regression_errors
@@ -91,6 +92,12 @@ def get_diffusion_model_architecture(args, n_features_in, n_features_out, num_no
                              conv_batch_norm = args.conv_batch_norm
 
         )
+
+    elif args.gnn_backbone == 'gnn-unet':
+        print("WARNING:GUNET backbone is not implemented with full parameter control.")
+        model = StockForecastDiffusionGUNet(depth = args.n_layers,
+                                            hidden_channels = args.hidden_dim,
+                                            )
 
     return model
 

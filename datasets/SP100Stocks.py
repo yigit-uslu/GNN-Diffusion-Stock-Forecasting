@@ -174,6 +174,7 @@ class SP100Stocks(Dataset):
 			torch.save(
 				timestep, osp.join(self.processed_dir, f"timestep_{t}.pt")
 			)
+			
 
 	def len(self) -> int:
 		values = pd.read_csv(self.raw_paths[0]).set_index(['Symbol', 'Date'])

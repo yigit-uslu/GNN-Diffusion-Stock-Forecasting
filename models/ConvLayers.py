@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import GCNConv, LEConv, TAGConv, MultiAggregation, GATv2Conv
 from torch_geometric.nn.models.mlp import MLP as pyg_mlp
+from torch_geometric.utils import to_torch_csr_tensor
 
 class Squeeze(nn.Module):
     def __init__(self, dim: int):
@@ -63,8 +64,12 @@ class ConvLayer(nn.Module):
 
     
     def forward(self, x, edge_index, edge_weight, batch = None):
-        x = self.conv_layer(x, edge_index = edge_index, edge_weight = edge_weight)
+        # Use sparse adjacency tensor for edge_index and edge_weight
+        adj_csr = to_torch_csr_tensor(edge_index, edge_weight, x.size(0))
+        x = self.conv_layer(x, edge_index = adj_csr, edge_weight = edge_weight)
+        # x = self.conv_layer(x, edge_index = edge_index, edge_weight = edge_weight)
         x = self.bn(x)
+        
         return x
     
 

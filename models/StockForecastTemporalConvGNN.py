@@ -487,6 +487,7 @@ class StockForecastTemporalConvGNN(nn.Module):
         self.embed_t = SinusoidalTimeEmbedding(in_hidden_channels_t_embed, T_max=num_timesteps)
         self.total_seq_length = num_timesteps + in_channels
 
+        kernel_size, padding = 5, 0
 
         self.layers = nn.ModuleList()
         self.layers.append(ResidualTemporalConvLayer(in_channels=hidden_channels,
@@ -506,9 +507,9 @@ class StockForecastTemporalConvGNN(nn.Module):
                                                   conv_batch_norm=conv_batch_norm,
                                                   num_nodes = self.num_nodes,
                                                   temporal_conv_kws={"stride": 2, # 2
-                                                                     "kernel_size": 3,
+                                                                     "kernel_size": kernel_size,
                                                                      "dilation": 1,
-                                                                     "padding": 0,
+                                                                     "padding": padding,
                                                                      "pool": "avg", # "avg" or "max" or "none"
                                                                      "input_sequence_length": self.total_seq_length
                                                                      }
@@ -551,9 +552,9 @@ class StockForecastTemporalConvGNN(nn.Module):
                                                   conv_batch_norm=conv_batch_norm,
                                                   num_nodes = self.num_nodes,
                                                   temporal_conv_kws={"stride": 1,
-                                                                     "kernel_size": 3,
+                                                                     "kernel_size": kernel_size, # 5,
                                                                      "dilation": 1,
-                                                                     "padding": 0,
+                                                                     "padding": padding, # 0
                                                                      "pool": "avg" if layer_id % 2 == 1 else "none" if layer_id == self.depth else "max", # "avg" or "max" or "none"
                                                                      "input_sequence_length": out_seq_length
                                                                      }
@@ -565,6 +566,9 @@ class StockForecastTemporalConvGNN(nn.Module):
                                                                      padding=res_temporal_conv_layer.temporal_conv_layer.padding,
                                                                      dilation=res_temporal_conv_layer.temporal_conv_layer.dilation
                                                                      )
+            
+            if out_seq_length <= self.out_channels:
+                padding = (kernel_size - 1) // 2 # Maintain sequence length if we are close to desired output length
             
             # Note that the projection layer is always from the original input sequence length to the new output sequence length,
             y_t_time_proj = nn.Linear(self.layers[0].T_in, res_temporal_conv_layer.T_out) if self.layers[0].T_in != res_temporal_conv_layer.T_out else nn.Identity()

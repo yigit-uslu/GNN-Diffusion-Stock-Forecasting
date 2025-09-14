@@ -9,7 +9,7 @@ SCRIPT="train"
 CUDA_VISIBLE_DEVICES=0 # Set this to the GPU you want to use, e.g., 0, 1, 2, etc.
 
 # group_name="17-Aug/100-nodes-graph-density-12-rmin-0.6"
-group_name="11-Sep/UnitTests-Temporal-Correlation-Graph"
+group_name="12-Sep/UnitTests-Temporal-Correlation-Graph"
 
 
 ################################ GENERAL CONFIG ################################
@@ -73,8 +73,8 @@ data_dir="./datasets/raw"
 train_dataset_fraction=0.9
 corr_threshold=0.6 # 0.7 Thresholding for the correlation matrix
 sector_bonus=0.05 # Bonus for stocks sharing the same sector
-past_window=20 # 25 Past window of features including closing prices and daily log returns
-future_window=5 # 10 Set these windows equal =$past_window
+past_window=10 # 25 Past window of features including closing prices and daily log returns
+future_window=10 # 10 Set these windows equal =$past_window
 temporal_correlation_graph=True # False Whether to compute a temporal correlation graph and combine it with the existing graph.
 
 
@@ -86,15 +86,15 @@ temporal_correlation_graph=True # False Whether to compute a temporal correlatio
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
 ###########################################################################
 
-gnn_backbone_diffusion="temporal-resplus-gnn"
+gnn_backbone_diffusion="resplus-gnn"
 ###############################
-lr_diffusion=2e-3 # 1e-2
-weight_decay_diffusion=1e-4 # 1e-4
+lr_diffusion=1e-2 # 1e-2
+weight_decay_diffusion=1e-3 # 1e-4
 lr_sched_gamma_diffusion=0.99 # 0.5 # 0.9
 grad_clipping_constant_diffusion=10.0
 clip_grad_by_diffusion="value" # "value" # "norm"
 ###############################
-n_layers_diffusion=4 # 6
+n_layers_diffusion=6 # 6
 k_hops_diffusion=2 # 2
 norm_layer_diffusion="graph" # "batch"
 layer_norm_mode_diffusion="node"
@@ -103,12 +103,12 @@ aggr_list_diffusion="mean, max, min" # "add,mean,max" # List of aggregation meth
 conv_batch_norm_diffusion=True # Whether batch norm is applied in each GNN layer following the GConv.
 dropout_rate_diffusion=0.2
 ###############################
-hidden_dim_diffusion=128 # 128
+hidden_dim_diffusion=64 # 128
 ###############################
 x_batch_size_diffusion=64 # 64
 diffuse_n_samples_diffusion=500 # 500
 sampler_diffusion="ddpm"
-batch_size_diffusion=1 # 10
+batch_size_diffusion=10 # 10
 edge_features_nb=2
 
 ###########################################################################

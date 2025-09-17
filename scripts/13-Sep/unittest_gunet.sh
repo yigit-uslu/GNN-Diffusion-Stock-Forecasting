@@ -89,27 +89,29 @@ temporal_correlation_graph=True # False Whether to compute a temporal correlatio
 gnn_backbone_diffusion="gnn-unet"
 ###############################
 lr_diffusion=1e-2 # 1e-2 
-weight_decay_diffusion=1e-5 # 1e-4
+weight_decay_diffusion=1e-6 # 1e-4
 lr_sched_gamma_diffusion=0.99 # 0.5 # 0.9
-grad_clipping_constant_diffusion=10.0
-clip_grad_by_diffusion="value" # "value" # "norm"
+grad_clipping_constant_diffusion=5.0
+clip_grad_by_diffusion="norm" # "value" # "norm"
 ###############################
-n_layers_diffusion=3 # 6
-k_hops_diffusion=2 # 2
+n_layers_diffusion=3 # 3
+k_hops_diffusion=3 # 2
 norm_layer_diffusion="graph" # "batch"
 layer_norm_mode_diffusion="node"
 conv_layer_normalize_diffusion=False # GCN normalization applied to the graph.
 aggr_list_diffusion="mean, max, min" # "add,mean,max" # List of aggregation methods to use (e.g., "add,mean,max"). If None, the default aggregation of the convolution layer is used.
 conv_batch_norm_diffusion=True # Whether batch norm is applied in each GNN layer following the GConv.
-dropout_rate_diffusion=0.2
+dropout_rate_diffusion=0.0
 ###############################
-hidden_dim_diffusion=128 # 128
+hidden_dim_diffusion=64 # 128
 ###############################
 x_batch_size_diffusion=100 # 64
 diffuse_n_samples_diffusion=500 # 500
 sampler_diffusion="ddpm"
 batch_size_diffusion=1 # 10
 edge_features_nb=2 # 2
+pool_ratio_diffusion=0.8 # 0.5
+n_convs_per_block_diffusion=2
 
 ###########################################################################
 #################### DIFFUSION MODEL & TRAINING CONFIG ####################
@@ -121,7 +123,7 @@ load_cd_train_chkpt_path_diffusion="none" # "Power-Allocation-GDM-Experiments/09
 
 # num_graphs=80 # 32
 MAX_EFFECTIVE_BATCH_SIZE_DIFFUSION=200
-EFFECTIVE_TRAINING_STEPS=1000000 #100000
+EFFECTIVE_TRAINING_STEPS=100000 #100000
 # CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=$(expr 100 / $MAX_JOBS)
 
 norm_layer_diffusion_values=("layer")
@@ -172,11 +174,12 @@ for batch_size_diffusion in "${batch_size_diffusion_values[@]}"; do
                                                                   --x_batch_size_diffusion=$x_batch_size_diffusion --diffuse_n_samples_diffusion=$diffuse_n_samples_diffusion --sampler_diffusion="${sampler_diffusion}" \
                                                                   --lr_diffusion=$lr_diffusion --weight_decay_diffusion=$weight_decay_diffusion --lr_sched_gamma_diffusion=$lr_sched_gamma_diffusion \
                                                                   --hidden_dim_diffusion=$hidden_dim_diffusion --n_layers_diffusion=$n_layers_diffusion --k_hops_diffusion=$k_hops_diffusion \
+                                                                  --n_convs_per_block_diffusion=$n_convs_per_block_diffusion \
                                                                   --n_epochs_diffusion=$n_epochs_diffusion \
                                                                   --grad_clipping_constant_diffusion=$grad_clipping_constant_diffusion --clip_grad_by_diffusion="${clip_grad_by_diffusion}" \
                                                                   --norm_layer_diffusion="${norm_layer_diffusion}" --layer_norm_mode_diffusion="${layer_norm_mode_diffusion}" \
                                                                   --conv_batch_norm_diffusion=$conv_batch_norm_diffusion --aggr_list_diffusion="${aggr_list_diffusion}" --conv_layer_normalize_diffusion=$conv_layer_normalize_diffusion \
-                                                                  --dropout_rate_diffusion=$dropout_rate_diffusion  --pool_ratio_diffusion=0.8 --apply_gcn_norm_diffusion=$True &
+                                                                  --dropout_rate_diffusion=$dropout_rate_diffusion  --pool_ratio_diffusion=$pool_ratio_diffusion --apply_gcn_norm_diffusion=$True &
 
                                                             
     ((process_counter++))  # Increment job count

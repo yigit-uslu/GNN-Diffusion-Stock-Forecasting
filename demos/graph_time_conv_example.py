@@ -1,7 +1,10 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from torch_geometric.utils import dense_to_sparse
+from torch_geometric.utils import (
+    dense_to_sparse, add_self_loops, remove_self_loops,
+    scatter, to_torch_csr_tensor
+)
 from torch_geometric.data import Data
 from torch_geometric.nn import TAGConv
 import networkx as nx
@@ -16,6 +19,105 @@ def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+
+def augment_adj(edge_index: torch.Tensor, edge_weight: torch.Tensor,
+                    num_nodes: int):
+    """
+    Augment the adjacency matrix by adding 2-hop connections.
+    """
+        
+    edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
+    edge_index, edge_weight = add_self_loops(edge_index, edge_weight,
+                                                num_nodes=num_nodes)
+    adj = to_torch_csr_tensor(edge_index, edge_weight,
+                                size=(num_nodes, num_nodes))
+    adj = (adj @ adj).to_sparse_coo()
+    edge_index, edge_weight = adj.indices(), adj.values()
+    edge_index, edge_weight = remove_self_loops(edge_index, edge_weight)
+    
+    return edge_index, edge_weight
+
+
+
+
+def pool_two_neighborhood_features(x, edge_index, edge_weight=None, pool = "max", threshold: float = None):
+    """
+    Perform 2-hop neighborhood pooling of node features.
+    
+    Args:
+        x: Node feature matrix of shape (N, F_in)
+        edge_index: Edge index tensor of shape (2, E)
+        edge_weight: Optional edge weights tensor of shape (E,)
+        k: Number of hops for neighborhood aggregation
+
+    Returns:
+        Pooled node feature matrix of shape (N, F_in)
+    """
+
+    # Filter out edges with edge_weight less than threshold
+    if edge_weight is not None and threshold is not None:
+        mask = edge_weight >= threshold
+        print("Threshold masked {} percent of edges.".format(100 * (1 - mask.float().mean().item())))
+        edge_index = edge_index[:, mask]
+        edge_weight = edge_weight[mask]
+        print(f"Filtered edges with weight > {threshold}. New edge count: {edge_index.shape[1]}")
+
+    edge_index, edge_weight = augment_adj(edge_index, edge_weight, num_nodes=x.size(0))
+
+    return pool_neighboring_features(x, edge_index, edge_weight, pool=pool, threshold=None)
+
+
+
+
+
+
+def pool_neighboring_features(x, edge_index, edge_weight=None, pool = "max",
+                              threshold: float = None):
+    """
+    Perform max pooling of neighboring node features.
+    
+    Args:
+        x: Node feature matrix of shape (N, F_in)
+        edge_index: Edge index tensor of shape (2, E)
+        edge_weight: Optional edge weights tensor of shape (E,)
+    
+    Returns:
+        Pooled node feature matrix of shape (N, F_in)
+    """
+    print("Performing max pooling of neighboring features...")
+
+    print("x.shape: ", x.shape)
+    print("edge_index.shape: ", edge_index.shape)
+    if edge_weight is not None:
+        print("edge_weight.shape: ", edge_weight.shape)
+    else:
+        print("No edge weights provided.")
+
+    # Filter out edges with edge_weight less than threshold
+    if edge_weight is not None and threshold is not None:
+        mask = edge_weight < threshold
+        print("Threshold masked {} percent of edges.".format(100 * (1 - mask.float().mean().item())))
+        edge_index = edge_index[:, mask]
+        edge_weight = edge_weight[mask]
+        print(f"Filtered edges with weight > {threshold}. New edge count: {edge_index.shape[1]}")
+
+
+    edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+    row, col = edge_index
+    
+    # Perform max pooling using scatter_max
+    # pooled_x, _ = scatter_max(x[col], row, dim=0, dim_size=x.size(0))
+    pooled_x = scatter(x[row], col, dim=0, dim_size=x.size(0), reduce='max' if pool == "max" else 'mean')
+
+    print("x.shape:", x.shape)
+    print("pooled_x.shape:", pooled_x.shape)
+
+   
+    return pooled_x, edge_index, edge_weight
+    
 
 
 
@@ -435,7 +537,8 @@ def demo_graph_time_conv_block(F_in, F_out, N, T, K):
     os.makedirs("./gtconv", exist_ok=True)
 
     # Generate a random N x N weighted adjacency matrix
-    adj = create_rand_adj(N, sparsity=0.2, add_self_loops=False, remove_self_loops=True)
+    sparsity = 0.5 # 0.2
+    adj = create_rand_adj(N, sparsity=sparsity, add_self_loops=False, remove_self_loops=True)
 
     # Generate a random graph signal X that is a tensor of shape N x F_in x T
     x = torch.randint(0, 10, (N, F_in, T)) / 1.0 # / 10.0 - 0.5  # Values between -0.5 and 0.5
@@ -472,6 +575,39 @@ def demo_graph_time_conv_block(F_in, F_out, N, T, K):
         # Also create a version without feature matrices for comparison
         data_conv = plot_graph(data_conv, save_path="./gtconv/graph_after_conv.png", 
                         edge_style="auto_max_bend", show_feature_matrices=True)
+        
+
+        data_max_pooled = data_conv.clone()
+
+        one_hop_pooled_x, e, w = pool_neighboring_features(x = data_max_pooled.x.reshape(-1, F_in * T), 
+                                      edge_index = data_max_pooled.edge_index,
+                                      edge_weight = data_max_pooled.edge_attr.squeeze(-1),
+                                      pool = "max",
+                                      threshold = 0.7,
+                                    #   threshold = 
+                                      )
+
+        plot_graph(data_max_pooled, save_path="./gtconv/graph_after_1-hop_max_pool.png", 
+                   edge_style="auto_max_bend", show_feature_matrices=True)
+        
+
+        two_hop_pooled_x, e, w = pool_two_neighborhood_features(x = data_max_pooled.x.reshape(-1, F_in * T), 
+                                      edge_index = data_max_pooled.edge_index,
+                                      edge_weight = data_max_pooled.edge_attr.squeeze(-1),
+                                      pool = "max",
+                                      threshold = 0.7,
+                                      )
+        
+        data_max_pooled.x = two_hop_pooled_x.reshape(-1, F_in, T)
+        data_max_pooled.edge_index = e
+        if w is not None:
+            data_max_pooled.edge_attr = w
+
+        plot_graph(data_max_pooled, save_path="./gtconv/graph_after_2-hop_max_pool.png", 
+                   edge_style="auto_max_bend", show_feature_matrices=True)
+        
+
+
         
 
         # temporal_conv(data_conv, time_dim = 2)

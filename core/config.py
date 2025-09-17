@@ -316,6 +316,7 @@ def make_parser(parse_known_args=False):
     CD_model_args.add_argument('--load_model_chkpt_path_diffusion', type = none_or_str, default=None, help = 'Pre-trained model weights load path.') # pre-trained model weights load
     CD_model_args.add_argument('--load_cd_train_chkpt_path_diffusion', type = none_or_str, default=None, help = 'Path to the checkpoint for the CD training.')    
     CD_model_args.add_argument('--n_layers_diffusion', type = int, default=4, help = 'Num of gnn backbone blocks.')
+    CD_model_args.add_argument('--n_convs_per_block_diffusion', type = int, default=2, help = 'Num of convolutions per GNN block.')
     CD_model_args.add_argument('--n_sublayers_diffusion', type = int, default=2, help = 'Num of features in GNN layers.')
     CD_model_args.add_argument('--hidden_dim_diffusion', type = int, default=64, help = 'Num of features in each layer of a GNN block.')
     CD_model_args.add_argument('--batch_norm_diffusion', type = str2bool, default=True, help = 'Batch normalization in GNN layers.')
@@ -329,7 +330,7 @@ def make_parser(parse_known_args=False):
     CD_model_args.add_argument('--res_connection_diffusion', type = str, default='skip', choices=['mlp', 'skip'], help = 'Type of residual connection (GraphTransfromer only)')
     CD_model_args.add_argument('--norm_layer_diffusion', type = str, default=None, choices=[None, 'batch', 'layer', 'graph', 'instance', 'group'], help = 'Type of normalization layer (GraphUNet only)')
     CD_model_args.add_argument('--layer_norm_mode_diffusion', type = str, default="node", choices = ['node', 'graph'], help = 'Mode of operation if layer normalization is used.')
-    CD_model_args.add_argument('--pool_layer_diffusion', type = str, default='topk', choices=['topk', 'spectral', 'centrality'], help = 'Type of pooling layer (GraphUNet only)')
+    CD_model_args.add_argument('--pool_layer_diffusion', type = str, default='none', choices=['none', 'mean', 'max', 'sum'], help = 'Type of pooling layer (GraphUNet only)')
     CD_model_args.add_argument('--pool_ratio_diffusion', type = float, default=0.5, help = 'Pooling ratio.')
     CD_model_args.add_argument('--pool_multiplier_diffusion', type = float, default=1., help = 'Post-multiply pooled features to rescale them.')
     CD_model_args.add_argument('--sum_skip_connection_diffusion', type = str2bool, default=True, help = 'Whether sum or concatenate skip connections with block outputs.')

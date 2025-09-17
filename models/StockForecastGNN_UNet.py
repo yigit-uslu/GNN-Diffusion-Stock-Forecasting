@@ -6,7 +6,9 @@ from models.unet import UNet
 
 
 class GUNet(nn.Module):
-    def __init__(self, depth: int = 3, sampling_factor: Union[int, List[int]] = 2,
+    def __init__(self, depth: int = 3,
+                 sampling_factor: Union[int, List[int]] = 2,
+                 graph_pooling_factor: float = 2.0, # separate pooling factor for node dimension
                  num_nodes: int = 100,
                  T_diffusion: int = 500,
                  cond_in_channels: int = 8,  # Features per node
@@ -14,7 +16,8 @@ class GUNet(nn.Module):
                  hidden_channels: int = 64, # initial hidden feature dimension in the UNet
                  hidden_timesteps: int = None, # initial hidden temporal dimension in the UNet
                  in_channels: int = 1, # input node feature dimension
-                 out_channels: int = 5): # Same as future window
+                 out_channels: int = 5,
+                 gnn_kws: dict = {}): # Same as future window
         super(GUNet, self).__init__()
 
         self.out_channels = out_channels
@@ -22,6 +25,20 @@ class GUNet(nn.Module):
         if isinstance(sampling_factor, int):
             sampling_factor = [sampling_factor] * depth
         assert len(sampling_factor) == depth, "Length of sampling_factor list must match depth."
+
+        if isinstance(graph_pooling_factor, float):
+            graph_pooling_factor = [graph_pooling_factor] * depth
+        assert len(graph_pooling_factor) == depth, "Length of graph_pooling_factor list must match depth."
+
+        # Adjust graph_pooling_factor to ensure integer number of nodes at each layer
+        prev_nodes = num_nodes
+        for i, gpf in enumerate(graph_pooling_factor):
+            new_nodes = int(prev_nodes / gpf)
+            graph_pooling_factor[i] = prev_nodes / new_nodes # Adjust gpf to ensure integer number of nodes
+            prev_nodes = new_nodes
+
+        # Combine node pooling and temporal downsampling factors
+        sampling_factor = [(graph_pooling_factor[i], sampling_factor[i]) for i in range(depth)]
 
         # T_in = future_window = out_channels
         past_window = cond_in_timesteps
@@ -50,6 +67,7 @@ class GUNet(nn.Module):
         self.net = UNet(F_in = hidden_channels, N_in = num_nodes, T_in = hidden_timesteps, T_min=T_min,
                         downsample_factor=sampling_factor,
                         cond_kws = {"in_channels": cond_in_channels, "in_timesteps": cond_in_timesteps, "hidden_channels": hidden_channels, "hidden_timesteps": hidden_timesteps},
+                        gnn_kws = gnn_kws, # GNN specific parameters
                         # cond_F_in=cond_in_channels, cond_T_in=cond_in_timesteps,
                         )
         
@@ -71,7 +89,8 @@ class GUNet(nn.Module):
 
         pred_noise = self.net(x = y_t, t = t,
                               cond = x, #None,
-                              edge_index = edge_index, edge_weight = edge_weight, batch = batch)
+                              edge_index = edge_index, edge_weight = edge_weight, batch = batch,
+                              debug_print = debug_forward_pass or self.total_forward_calls == 0)
 
         pred_noise = self.projection_head(pred_noise)
 
@@ -110,9 +129,23 @@ class GUNet(nn.Module):
 
 
 class StockForecastDiffusionGUNet(nn.Module):
-    def __init__(self, depth: int = 3, sampling_factor: Union[int, List[int]] = 2):
+    def __init__(self, depth: int = 3,
+                 sampling_factor: Union[int, List[int]] = 2,
+                 graph_pooling_factor: float = 2.0,
+                 k_hops: int = 2, num_gnn_layers_per_block: int = 2, dropout: float = 0.1,
+                 hidden_channels: int = 64,
+                 future_window: int = 5,
+                 past_window: int = 20,
+                 cond_num_features: int = 8,
+                 ):
         super(StockForecastDiffusionGUNet, self).__init__()
-        self.gunet = GUNet(depth = depth, sampling_factor = sampling_factor, hidden_channels = 64)
+        self.gunet = GUNet(depth = depth, sampling_factor = sampling_factor, hidden_channels = hidden_channels,
+                           out_channels = future_window,
+                           cond_in_timesteps = past_window, 
+                           cond_in_channels = cond_num_features,
+                           graph_pooling_factor = graph_pooling_factor,
+                           gnn_kws = {"K": k_hops, "num_layers": num_gnn_layers_per_block, "dropout": dropout}
+                           )
 
 
     def forward(self, y_t: torch.Tensor, t: torch.Tensor, data, return_attention_weights = False, debug_forward_pass = False):

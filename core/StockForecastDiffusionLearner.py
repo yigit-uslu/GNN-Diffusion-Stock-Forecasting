@@ -124,7 +124,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
     def make_validation_criteria_fnc(self):
         # return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
-        return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
+        return make_validation_criteria_fnc(min_epoch=50, validate_freq=50, max_loss = 0.50)
+        # return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
     
 
     def model_trained_criterion(self):
@@ -565,6 +566,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
             epoch_loss = epoch_pgrad_norm = 0.0
             num_batches = 0
 
+            debug_print = True if epoch < 10 else False
+
             for phase in dataloader:
                 if phase not in ['train']:
                     continue
@@ -582,8 +585,9 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                     #                                     follow_batch=None
                     #                                     )
 
-                    accelerator.print(f"Batch idx: {batch_idx}\tData: ", data)
-                    accelerator.print(f"Data.num_graphs: {data.num_graphs}")
+                    accelerator.print(f"Batch idx: {batch_idx}\tData: ", data) if debug_print else None
+                    accelerator.print(f"Data.num_graphs: {data.num_graphs}") if debug_print else None
+                    accelerator.print(f"Data.num_nodes: {data.num_nodes}") if debug_print else None
 
                     # Use the actual number of graphs if available
                     # num_graphs = getattr(data, '_actual_num_graphs', data.num_graphs)
@@ -592,7 +596,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                     # assert data._actual_num_graphs == datum.num_graphs * self.config.batch_size, f"Data.num_graphs: {data._actual_num_graphs} != datum.num_graphs * batch_size: {datum.num_graphs * self.config.batch_size}"
                     # assert data.num_nodes == datum.num_nodes * self.config.batch_size, f"Data.num_nodes: {data.num_nodes} != datum.num_nodes * batch_size: {datum.num_nodes * self.config.batch_size}"
 
-                    if epoch == 0 and phase == 'train':
+                    if debug_print and phase == 'train':
                         # Log batched data for reference in the first epoch only.
                         accelerator.print("Logging batched data for reference...")
                         for key, value in data.items():

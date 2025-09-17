@@ -7,9 +7,12 @@ from torch_geometric.data import Data
 
 from core.GRW import GeometricRandomWalk as GRW
 from core.GRW import CorrelatedGeometricRandomWalk as CGRW
+from models.unet_utils import get_pooling_selection_matrices
 
 def get_graph_in_pyg_format(values_path: str, adj_path: Union[str, list[str]],
-							target_column_name: str = "NormClose") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+							target_column_name: str = "NormClose",
+							pool_ratio: float = 0.5, pool_depth: int = 3,
+							) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
 	"""
 	Creates the PyTorch Geometric graph data from the stock price data and adjacency matrix.
 	:param values_path: Path of the CSV file containing the stock price data
@@ -69,21 +72,28 @@ def get_graph_in_pyg_format(values_path: str, adj_path: Union[str, list[str]],
 	degrees = orig_degrees.clone()
 	print("Original node degrees:", degrees.tolist())
 	# unsorted_indices = range(len(degrees))
-	depth = 4
+	depth = pool_depth
 
-	sorted, indices = torch.sort(degrees, descending=True)
-	selected_node_indices = indices[:(len(indices) // 2)]
-	selected_node_degrees = sorted[:(len(indices) // 2)]
 
-	all_selected_nodes = [selected_node_indices]
-	all_selected_degrees = [selected_node_degrees]
+	selection_matrices, num_pooled_nodes = get_pooling_selection_matrices(degrees, pool_ratio, depth)
 
-	selection_matrix = torch.zeros((len(sorted), len(selected_node_indices)), dtype=torch.long)
-	for col, node in enumerate(selected_node_indices):
-		selection_matrix[node, col] = 1
 
-	selection_matrix = selection_matrix.detach().cpu().numpy()
-	np.save(f"./datasets/raw/node_selection_matrices/C_{nodes_nb}_{len(selected_node_indices)}.npy", selection_matrix)
+	# pool_ratio = 0.5
+	# sorted, indices = torch.sort(degrees, descending=True)
+	# selected_node_indices = indices[:int(len(indices) // (1 / pool_ratio))]
+	# selected_node_degrees = sorted[:int(len(indices) // (1 / pool_ratio))]
+
+	# all_selected_nodes = [selected_node_indices]
+	# all_selected_degrees = [selected_node_degrees]
+
+	# selection_matrix = torch.zeros((len(sorted), len(selected_node_indices)), dtype=torch.long)
+	# for col, node in enumerate(selected_node_indices):
+	# 	selection_matrix[node, col] = 1
+
+	for i, selection_matrix in enumerate(selection_matrices):
+		selection_matrix = selection_matrix.t().detach().cpu().numpy()
+		N_in, N_out = selection_matrix.shape
+		np.save(f"./datasets/raw/node_selection_matrices/C_{N_in}_{N_out}.npy", selection_matrix)
 
     # num_nodes = len(degrees)
 	# all_selection_matrices = []
@@ -138,10 +148,10 @@ def get_graph_in_pyg_format(values_path: str, adj_path: Union[str, list[str]],
 	# 	unsorted_indices = torch.sort(unsorted_indices).values
 	# 	degrees = orig_degrees[unsorted_indices]
 
-	for nodes, degrees in zip(all_selected_nodes, all_selected_degrees):
-		print("*********************************\n\n\nNext set of nodes\n\n\n********************************")
-		for node, degree in zip(nodes, degrees):
-			print(f"Node {node.item()}: Degree {degree.item()}")
+	# for nodes, degrees in zip(all_selected_nodes, all_selected_degrees):
+	# 	print("*********************************\n\n\nNext set of nodes\n\n\n********************************")
+	# 	for node, degree in zip(nodes, degrees):
+	# 		print(f"Node {node.item()}: Degree {degree.item()}")
 
 	info_dict = {"Features": values.drop(columns=["Close"]).columns.tolist(),
 			  		"Target": target_column_name,

@@ -4,35 +4,74 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch_geometric.nn import TAGConv
+from torch_geometric.nn import MLP as pyg_mlp
 from typing import Tuple, Optional, Union, List
 from models.unet_embedding_utils import ConditionalEmbeddingLayer, Squeeze, SwapAxes
-from models.unet_utils import get_nn_conv1d_parameters, debug_print, inspect_tensor
+from models.unet_utils import get_nn_conv1d_parameters, debug_print, inspect_tensor, pool_neighboring_features, pool_two_neighborhood_features
+from torch_geometric.utils import to_torch_csr_tensor
 
 
-    
 
-# class SwapAxes(nn.Module):
-#     def __init__(self, dim0: int, dim1: int):
-#         super().__init__()
-#         self.dim0 = dim0
-#         self.dim1 = dim1
+class GraphPoolingLayer(nn.Module):
+    def __init__(self, reduce: str = "mean", k_hops: int = 1):
+        super().__init__()
+        assert reduce in ["mean", "max", "sum", "none"], "Pooling reduce must be either 'mean', 'max', 'sum', or 'none'."
+        self.reduce = reduce
+        self.k_hops = k_hops
 
-#     def forward(self, x):
-#         x = torch.swapaxes(x, self.dim0, self.dim1)
-#         return x
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor, batch: torch.Tensor = None):
+
+        if self.reduce == "none":
+            return x
+        
+        if self.k_hops == 1:
+            x, _, _ = pool_neighboring_features(x=x, edge_index=edge_index, edge_weight=edge_weight, pool=self.reduce)
+            return x
+        
+        if self.k_hops == 2:
+            x, _, _ = pool_two_neighborhood_features(x=x, edge_index=edge_index, edge_weight=edge_weight, pool=self.reduce)
+            return x
+        
 
 
 class GraphConvLayer(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, K: int = 2, dropout: float = 0.0, num_layers: int = 2, pool: str = "none", **kwargs):
         super().__init__()
 
-        self.conv = TAGConv(in_channels=in_channels, out_channels=out_channels, K=2, normalize=False, aggr = "mean")
-        self.norm = nn.LayerNorm(out_channels) # nn.BatchNorm1d(out_channels)
-        self.act = nn.LeakyReLU()
+        conv_layer = TAGConv(in_channels=in_channels, out_channels=out_channels, K=K, normalize=False,
+                            aggr = "mean")
+        norm_layer = nn.BatchNorm1d(out_channels) # nn.BatchNorm1d(out_channels)
+        act_layer = pyg_mlp(channel_list=[out_channels, 4 * out_channels, out_channels], act=nn.LeakyReLU())
+        dropout_layer = nn.Dropout1d(dropout)
 
-        # self.conv2 = TAGConv(in_channels=out_channels, out_channels=out_channels, K=2, normalize=False, aggr = "mean")
-        # self.norm = nn.LayerNorm(out_channels) # nn.BatchNorm1d(out_channels)
-        # self.act = nn.LeakyReLU()
+        pooling_layer = GraphPoolingLayer(reduce=pool, k_hops=1)
+
+        self.conv_layers = nn.ModuleList([conv_layer])
+        self.norm_layers = nn.ModuleList([norm_layer])
+        self.act_layers = nn.ModuleList([act_layer])
+        self.dropout_layers = nn.ModuleList([dropout_layer])
+        self.pooling_layers = nn.ModuleList([pooling_layer])
+
+        for _ in range(num_layers - 1):
+            conv_layer = TAGConv(in_channels=out_channels, out_channels=out_channels, K=K, normalize=False,
+                            aggr = "mean")
+            norm_layer = nn.BatchNorm1d(out_channels) # nn.BatchNorm1d(out_channels)
+            act_layer = pyg_mlp(channel_list=[out_channels, 4 * out_channels, out_channels], act=nn.LeakyReLU())
+            dropout_layer = nn.Dropout1d(dropout)
+            pooling_layer = GraphPoolingLayer(reduce=pool, k_hops=1)
+
+            self.conv_layers.append(conv_layer)
+            self.norm_layers.append(norm_layer)
+            self.act_layers.append(act_layer)
+            self.dropout_layers.append(dropout_layer)
+            self.pooling_layers.append(pooling_layer)
+
+        # self.conv2 = TAGConv(in_channels=out_channels, out_channels=out_channels, K=K, normalize=False,
+        #                      aggr = "mean")
+        # self.norm2 = nn.BatchNorm1d(out_channels) # nn.BatchNorm1d(out_channels)
+        # self.act2 = pyg_mlp(channel_list=[out_channels, out_channels], act=nn.LeakyReLU())
+        # self.dropout2 = nn.Dropout1d(dropout)
 
         edge_dim = 3
         self.edge_mlp = nn.Sequential(nn.Linear(edge_dim, 1), Squeeze(1), nn.SiLU())
@@ -42,25 +81,37 @@ class GraphConvLayer(nn.Module):
 
         # edge_weight: [num_edges, edge_dim]
         if edge_weight is not None and edge_weight.dim() == 2:
-            edge_weight = self.edge_mlp(edge_weight)  # [num_edges]
+            edge_weight_scalar = self.edge_mlp(edge_weight)  # [num_edges]
+        else:
+            edge_weight_scalar = edge_weight  # [num_edges] or None
         # else:
         #     edge_weight = edge_weight  # [num_edges] or None
 
-        x = self.conv(x, edge_index=edge_index, edge_weight=edge_weight)
-        x = self.act(x)
-        x = self.norm(x)
+        # Use sparse adjacency tensor for edge_index and edge_weight in convolutional layer
+        adj_csr = to_torch_csr_tensor(edge_index, edge_weight_scalar, x.size(0))
 
-        # x = self.conv2(x, edge_index=edge_index, edge_weight=edge_weight)
+        for conv, norm, act, dropout, pool in zip(self.conv_layers, self.norm_layers, self.act_layers, self.dropout_layers, self.pooling_layers):
+            x = conv(x, edge_index=adj_csr, edge_weight=edge_weight_scalar)
+            x = act(x)
+            x = dropout(x)
+            x = norm(x)
+            x = pool(x, edge_index=edge_index, edge_weight=edge_weight_scalar)
+        # x = self.conv(x, edge_index=edge_index, edge_weight=edge_weight_scalar)
         # x = self.act(x)
-        # x = self.norm(x)
-
+        # x = self.dropout(x)
+        # x = self.norm(x)        
+        # x = self.conv2(x, edge_index=edge_index, edge_weight=edge_weight_scalar)
+        # x = self.act2(x)
+        # x = self.dropout2(x)
+        # x = self.norm2(x)
         return x
 
 
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, in_timesteps, out_timesteps,
-                 hidden_channels = None):
+                 hidden_channels = None, 
+                 gnn_kws: dict = {"K": 2}):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels # this should be halved if conditioning is concatenated to the output later
@@ -107,7 +158,12 @@ class ResidualBlock(nn.Module):
         
         # self.conv2 = nn.Linear(out_channels, out_channels)
         self.graph_conv_block = GraphConvLayer(in_channels = graph_conv_in_channels, # out_channels,
-                                                out_channels = self.out_channels)
+                                                out_channels = self.out_channels,
+                                                K = gnn_kws.get("K", 2),
+                                                dropout = gnn_kws.get("dropout", 0.0),
+                                                num_layers = gnn_kws.get("num_layers", 2),
+                                                pool = gnn_kws.get("pool", "none"),
+                                                )
 
         if self.in_channels != self.out_channels or self.T_in != self.T_out:
             self.res_connection = nn.Sequential(nn.Linear(self.T_in, self.T_out), SwapAxes(2, 1), nn.Linear(self.in_channels, self.out_channels), SwapAxes(2,1))
@@ -118,18 +174,19 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x, edge_index = None, edge_weight = None, batch = None,
                 sel_mtrx: torch.Tensor = None,
-                cond = None, t = None) -> torch.Tensor:
+                cond = None, t = None,
+                debug_print: bool = False) -> torch.Tensor:
 
         assert sel_mtrx is None or sel_mtrx.dim() in [2, 3], "sel_mtrx must be of shape (N_out, N_in) or (B, N_out, N_in) if provided."
 
-        debug_print("x.shape at start of ResidualBlock: ", x.shape)  # (B*N, F_in, T)
+        print("x.shape at start of ResidualBlock: ", x.shape) if debug_print else None # (B*N, F_in, T)
         residual = self.res_connection(x)  # (B*N, F_in, T) -> (B*N, F_out, T) if needed
-        debug_print("residual.shape after linear projection if needed: ", residual.shape)  # (B*N, F_out, T)
+        print("residual.shape after linear projection if needed: ", residual.shape) if debug_print else None  # (B*N, F_out, T)
         
         # Temporal convolution block
-        debug_print("x.shape before temporal conv block: ", x.shape)  # (B*N, F, T)
+        print("x.shape before temporal conv block: ", x.shape) if debug_print else None  # (B*N, F, T)
         out = self.temporal_conv_block(x)
-        debug_print("x.shape after temporal conv block: ", out.shape)  # (B*N, F, T)
+        print("x.shape after temporal conv block: ", out.shape) if debug_print else None # (B*N, F, T)
 
 
         #### Graph convolution happens w.r.t. zero-padded signal ####
@@ -138,12 +195,12 @@ class ResidualBlock(nn.Module):
         edge_index_t, edge_weight_t, batch_t = self.repeat_graph_for_timesteps(edge_index, edge_weight, batch, T)
         
         out = out.reshape(B, -1, F, T)  # (B*N, F, T) -> (B, N, F, T)
-        inspect_tensor(out, dim_names=["batch", "node", "feature", "time"])
+        inspect_tensor(out, dim_names=["batch", "node", "feature", "time"]) if debug_print else None
         out = torch.moveaxis(out, source = -1, destination = 0).reshape(B*T, -1, F)  # (B*N, F, T) -> (T, B*N, F) -> (T*B, N, F)
 
         # Upsample out to original node dimension if sel_mtrx is provided
         if sel_mtrx is not None:
-            debug_print("sel_mtrx.shape before upsampling: ", sel_mtrx.shape)  # (N_0, N/2) or (B, N_0, N/2)
+            print("sel_mtrx.shape before upsampling: ", sel_mtrx.shape) if debug_print else None  # (N_0, N/2) or (B, N_0, N/2)
             sel_mtrx = sel_mtrx.t().unsqueeze(0).expand(B*T, -1, -1)  # (N_0, N) -> (B*T, N_0, N)
             out = torch.bmm(sel_mtrx, out)  # (B*T, N_0, N) @ (B*T, N, F) -> (B*T, N_0, F)
 
@@ -152,7 +209,7 @@ class ResidualBlock(nn.Module):
 
         # Add conditioning logic here 
         if t is not None: 
-            debug_print(f"t.shape: {t.shape}")  # (B * N_0, F, 1)
+            print(f"t.shape: {t.shape}") if debug_print else None # (B * N_0, F, 1)
             assert t.shape[1] == F, f"Feature dimensions of t and out must match. {t.shape[1]}-{F}"
             
             t = t.reshape(B, -1, F, 1).repeat(1, 1, 1, T)
@@ -161,17 +218,17 @@ class ResidualBlock(nn.Module):
             t = torch.bmm(sel_mtrx.transpose(2, 1), t)  # (B*T, N, N_0) @ (B*T, N_0, 1) -> (B*T, N, 1)
             t = torch.bmm(sel_mtrx, t)  # (B*T, N_0, N) @ (B*T, N, 1) -> (B*T, N_0, 1)
 
-            debug_print(f"Adding sinusoidal time embedding t to out in the zero-padded-domain.")
+            print(f"Adding sinusoidal time embedding t to out in the zero-padded-domain.") if debug_print else None
             out = out + t.reshape(-1, F)  # (B*T, N_0, F) + (B*T, N_0, F)
 
 
         if cond is not None: # [B*N_0, F, T]
-            debug_print(f"cond.shape: {cond.shape}")
+            print(f"cond.shape: {cond.shape}") if debug_print else None
             F_cond, T_cond = cond.shape[1], cond.shape[2]
             assert T == T_cond, f"Temporal dimensions of cond and out must match. {T_cond}-{T}"
             
             cond = cond.reshape(B, -1, F_cond, T_cond)  # (B*N_0, F, T) -> (B, N_0, F, T)
-            debug_print(f"cond.shape: {cond.shape}")
+            print(f"cond.shape: {cond.shape}") if debug_print else None
 
             cond = torch.moveaxis(cond, source = -1, destination = 0).reshape(B*T_cond, -1, F_cond) 
             # cond = torch.bmm(sel_mtrx, cond)  # (B*T, N_0, N) @ (B*T, N, F_cond) -> (B*T, N_0, F_cond)
@@ -183,18 +240,18 @@ class ResidualBlock(nn.Module):
             
             cond = cond.reshape(-1, F_cond)
 
-            debug_print("Applying conditional embedding in the zero-padded-domain.")
-            debug_print(f"cond.shape: {cond.shape}, out.shape: {out.shape}")
+            print("Applying conditional embedding in the zero-padded-domain.") if debug_print else None
+            print(f"cond.shape: {cond.shape}, out.shape: {out.shape}") if debug_print else None
             if self.cond_embed_strategy == "concat":
                 out = torch.cat([out, cond], dim=-1)  # Concatenate along feature dimension
             else:
                 out = out + cond  # Add conditional embedding
 
 
-        debug_print("out.shape before graph conv block: ", out.shape)  # (T*B*2*N, F)        
-        
+        print("out.shape before graph conv block: ", out.shape) if debug_print else None  # (T*B*2*N, F)
+
         out = self.graph_conv_block(out, edge_index = edge_index_t, edge_weight = edge_weight_t, batch = batch_t)
-        debug_print("out.shape after graph conv block: ", out.shape)  # (T*B*2*N, F)
+        print("out.shape after graph conv block: ", out.shape) if debug_print else None  # (T*B*2*N, F)
 
         F = out.shape[-1] # F might have changed after graph conv
         out = out.reshape(B*T, -1, F)  # (B*T, 2*N, F)
@@ -205,7 +262,7 @@ class ResidualBlock(nn.Module):
 
         # edge_index, edge_weight, batch
         out = torch.moveaxis(out.reshape(T, -1, F), source = 0, destination = 2)  # ((B*T, N, F) -> (T, B*N, F) -> (B*N, F, T)
-        debug_print("out.shape after reshaping back to (B*N, F, T): ", out.shape)  # (B*N, F, T)                         
+        print("out.shape after reshaping back to (B*N, F, T): ", out.shape) if debug_print else None  # (B*N, F, T)                         
         
         out =  out + residual
         # out = self.relu(out)
@@ -325,6 +382,9 @@ class NodeUpDownSamplingBlock(nn.Module):
         by generating a random row permutation of the identity matrix and taking the first N_out rows in sorted order.
         """
 
+        assert N_out <= N_in, "N_out must be less than or equal to N_in."
+        assert isinstance(N_out, int), "N_out must be an integer but got {} of type {}.".format(N_out, type(N_out))
+
         if N_in == N_out:
             print("N_in == N_out = {}, using identity selection matrix.".format(N_in))
             C = torch.eye(N_in)
@@ -379,9 +439,12 @@ class Block(nn.Module):
 
 
 class DownBlock(Block):
-    def __init__(self, in_channels, in_nodes, in_timesteps, ds_factor: Union[int, float] = 2, # float for upsampling
+    def __init__(self, in_channels, in_nodes, in_timesteps,
+                 gnn_kws: dict,
+                  ds_factor: Union[int, float] = 2, # float for upsampling
                  out_channels = None, out_nodes = None, out_timesteps = None,
-                 depth: int = None):
+                 depth: int = None,
+                 ):
         super().__init__(in_channels, in_nodes, in_timesteps, ds_factor, out_channels, out_nodes, out_timesteps)
         self.depth = depth
 
@@ -389,7 +452,9 @@ class DownBlock(Block):
                                                  N_out = out_nodes
                                                  )
 
-        self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.in_timesteps, out_timesteps = self.out_timesteps)
+        self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.in_timesteps, out_timesteps = self.out_timesteps,
+                                       gnn_kws = gnn_kws
+                                       )
 
         print(self.__repr__())
 
@@ -397,14 +462,16 @@ class DownBlock(Block):
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor, batch: torch.Tensor = None,
                 sel_mtrx: torch.Tensor = None,
                 t: torch.Tensor = None,
-                cond: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+                cond: torch.Tensor = None,
+                debug_print: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
         x = self.res_block(x, edge_index = edge_index, edge_weight = edge_weight, batch = batch, sel_mtrx = sel_mtrx,
                             t=t,
-                            cond = cond
+                            cond = cond,
+                            debug_print = debug_print
                             )
-        debug_print("x.shape after residual block: ", x.shape)  # (B*N_in, F_out, T_out)
+        print("x.shape after residual block: ", x.shape) if debug_print else None  # (B*N_in, F_out, T_out)
         x, C = self.graph_pool(x, batch, up_or_downsample = "down")
 
         x = x.reshape(x.shape[0], self.out_channels, -1)
@@ -419,26 +486,43 @@ class DownBlock(Block):
 
 
 class UpBlock(Block):
-    def __init__(self, in_channels, in_nodes, in_timesteps, us_factor: int = 2, out_nodes = None, out_channels = None, out_timesteps = None,
+    def __init__(self, in_channels, in_nodes, in_timesteps,
+                 gnn_kws: dict,
+                 us_factor: int = 2, out_nodes = None, out_channels = None, out_timesteps = None,
                  graph_pool = None, depth: int = None):
-        ds_factor = int(1 / us_factor)
-        super().__init__(in_channels, in_nodes, in_timesteps, ds_factor = ds_factor, out_channels = out_channels, out_nodes = out_nodes, out_timesteps = out_timesteps)
+        
+        node_us_factor = out_nodes / in_nodes if out_nodes is not None else us_factor
+        feature_us_factor = out_channels / in_channels if out_channels is not None else us_factor
+        
+        # us_factor = int(out_nodes / in_nodes) if out_nodes is not None else us_factor
+        node_ds_factor = 1 / node_us_factor
+        feature_ds_factor = 1 / feature_us_factor
+        print(f"UpBlock with node upsampling factor {node_us_factor} and feature us_factor = us_factor = {feature_us_factor}, i.e., node_ds_factor = {node_ds_factor} and ds_factor = feature_ds_factor = {feature_ds_factor}.")
+        super().__init__(in_channels, in_nodes, in_timesteps, ds_factor = feature_ds_factor, out_channels = out_channels, out_nodes = out_nodes, out_timesteps = out_timesteps)
         self.depth = depth
 
-        self.cond_embed_connection = nn.Sequential(
-            SwapAxes(1, 2),
-            nn.Linear(self.in_channels * 2, self.in_channels),
-            SwapAxes(1, 2)
-        )
+        if feature_us_factor == 1:
+            print("No upsampling in UpBlock, using identity for cond_embed_connection and time_embed_connection.")
+            self.cond_embed_connection = nn.Identity()
+            self.time_embed_connection = nn.Identity()
+        
+        else:
+            print("Upsampling in UpBlock, using linear layers for cond_embed_connection and time_embed_connection.")
+            self.cond_embed_connection = nn.Sequential(
+                SwapAxes(1, 2),
+                nn.Linear(int(self.in_channels * feature_us_factor), self.in_channels),
+                SwapAxes(1, 2)
+            )
+            self.time_embed_connection = nn.Linear(int(self.in_channels * feature_us_factor), self.in_channels)
 
-        self.time_embed_connection = nn.Linear(self.in_channels * 2, self.in_channels)
 
-        self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.out_timesteps, out_timesteps = self.out_timesteps)
+        self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.out_timesteps, out_timesteps = self.out_timesteps,
+                                       gnn_kws = gnn_kws)
         
         if graph_pool is not None:
             self.graph_pool = graph_pool
         else:
-            self.graph_pool = NodeUpDownSamplingBlock(N_in = in_nodes, ds_factor = ds_factor,
+            self.graph_pool = NodeUpDownSamplingBlock(N_in = in_nodes, ds_factor = node_ds_factor,
                                                      N_out = out_nodes
                                                      )
             
@@ -446,33 +530,35 @@ class UpBlock(Block):
         print(self.__repr__())
             
 
-    def zero_interleave_time(self, x: torch.Tensor):
-        print("x.shape, self.in_timesteps, self.out_timesteps: ", x.shape, self.in_timesteps, self.out_timesteps)
+    def zero_interleave_time(self, x: torch.Tensor, debug_print: bool = False) -> torch.Tensor:
+        print("x.shape, self.in_timesteps, self.out_timesteps: ", x.shape, self.in_timesteps, self.out_timesteps) if debug_print else None
         x_zeros = torch.zeros(*x.shape[:-1], self.out_timesteps, device=x.device)
         step = self.out_timesteps // self.in_timesteps
-        print("time slice step: ", step)
+        print("time slice step: ", step) if debug_print else None
         x_zeros[..., ::step] = x
         return x_zeros
     
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor, batch: torch.Tensor = None,
-                sel_mtrx: torch.Tensor = None, t: torch.Tensor = None, cond: torch.Tensor = None) -> torch.Tensor:
+                sel_mtrx: torch.Tensor = None, t: torch.Tensor = None, cond: torch.Tensor = None,
+                debug_print: bool = False) -> torch.Tensor:
         
         if cond is not None:
-            debug_print("cond.shape before cond_embed_connection: ", cond.shape)  # (B*N_out, F_out, T_out)
+            print("cond.shape before cond_embed_connection: ", cond.shape) if debug_print else None # (B*N_out, F_out, T_out)
             cond = self.cond_embed_connection(cond)
-            debug_print("cond.shape after cond_embed_connection: ", cond.shape)  # (B*N_out, F_out, T_out)
+            print("cond.shape after cond_embed_connection: ", cond.shape)  if debug_print else None # (B*N_out, F_out, T_out)
 
         if t is not None:
-            debug_print("t.shape before time_embed_connection: ", t.shape)  # (B*N_out, F_out, 1)
+            print("t.shape before time_embed_connection: ", t.shape) if debug_print else None  # (B*N_out, F_out, 1)
             t = self.time_embed_connection(t.squeeze(-1)).unsqueeze(-1)  # (B*N_out, F_out, 1)
-            debug_print("t.shape after time_embed_connection: ", t.shape)  # (B*N_out, F_out, 1)
+            print("t.shape after time_embed_connection: ", t.shape) if debug_print else None  # (B*N_out, F_out, 1)
         
         x, _ = self.graph_pool(x, batch, up_or_downsample = "up")
         x = x.reshape(x.shape[0], self.in_channels, -1)
 
-        x = self.zero_interleave_time(x)
-        x = self.res_block(x, edge_index = edge_index, edge_weight = edge_weight, batch = batch, sel_mtrx = sel_mtrx, t = t, cond = cond)
+        x = self.zero_interleave_time(x, debug_print=debug_print)
+        x = self.res_block(x, edge_index = edge_index, edge_weight = edge_weight, batch = batch, sel_mtrx = sel_mtrx, t = t, cond = cond,
+                    debug_print = debug_print)
 
         return x
     
@@ -516,7 +602,9 @@ class UNet(nn.Module):
     Placeholder UNet class.
     The actual UNet implementation should go here.
     """
-    def __init__(self, F_in, N_in, T_in, downsample_factor: List[int], cond_kws: dict,
+    def __init__(self, F_in, N_in, T_in, downsample_factor: List[Union[Union[int, float], Tuple[Union[int, float], Union[int, float]]]],
+                 cond_kws: dict,
+                 gnn_kws: dict,
                  F_min = 2, N_min = 2, T_min = 4,
                  ):
         super().__init__()
@@ -542,12 +630,34 @@ class UNet(nn.Module):
         cond_embed_layers = nn.ModuleList()
         time_embed_layers = nn.ModuleList()
         for depth, ds_factor in enumerate(self.downsample_factor_list, 1):
-            F_1 = max(F_min, F_0 // ds_factor)
-            N_1 = max(N_min, N_0 // ds_factor)
-            T_1 = max(T_min, T_0 // ds_factor)
+
+            print(f"Depth: {depth}, ds_factor: {ds_factor}")
+            print(f"Current dimensions before downsampling: F_0={F_0}, N_0={N_0}, T_0={T_0}")
+
+            if isinstance(ds_factor, tuple):
+                assert len(ds_factor) == 2, "ds_factor tuple must be of length 2."
+                node_ds_factor = ds_factor[0]  # Use only the node downsampling factor for now.
+                feature_ds_factor = ds_factor[1]
+            else:
+                node_ds_factor = ds_factor
+                feature_ds_factor = ds_factor
+
+            # First level should not downsample the nodes
+            if depth == 1:
+                node_ds_factor = 1.0
+                feature_ds_factor = 1.0
+                print("First level, setting node_ds_factor to 1.0 to avoid downsampling nodes.")
+         
+
+            F_1 = max(F_min, int(F_0 // feature_ds_factor))
+            N_1 = max(N_min, int(N_0 // node_ds_factor))
+            T_1 = max(T_min, int(T_0 // feature_ds_factor))
             ds_block = DownBlock(in_channels=F_0, in_nodes=N_0, in_timesteps=T_0,
                                  out_channels=F_1, out_nodes=N_1, out_timesteps=T_1,
-                                 ds_factor=ds_factor, depth=depth)
+                                 ds_factor=feature_ds_factor, # this ds factor is redundant
+                                 depth=depth,
+                                 gnn_kws=gnn_kws
+                                 )
             ds_blocks.append(ds_block)
 
             cond_embed_layer = ConditionalEmbeddingLayer(in_channels=cond_F_in, out_channels=F_0,
@@ -560,7 +670,9 @@ class UNet(nn.Module):
 
             us_block = UpBlock(in_channels=F_1, out_channels=F_0,
                                in_nodes=N_1, out_nodes=N_0, in_timesteps=T_1, out_timesteps=T_0,
-                               graph_pool=ds_block.graph_pool, depth=depth)  # Share the same graph pooling layer
+                               graph_pool=ds_block.graph_pool, depth=depth,
+                               gnn_kws=gnn_kws
+                               )
             us_blocks.append(us_block)
 
             F_0 = F_1
@@ -611,7 +723,9 @@ class UNet(nn.Module):
             x_ds, C = block(x = x_ds, edge_index = edge_index, edge_weight = edge_weight, batch = batch,
                             sel_mtrx = sel_mtrx, # if depth > 1 else None,
                             t = time_emb,
-                            cond = cond_emb)
+                            cond = cond_emb,
+                            debug_print = debug_print
+                            )
 
             sel_mtrx = C @ sel_mtrx
             print("\n\n\n\nComposed sel_mtrx shape: ", sel_mtrx.shape) if debug_print else None
@@ -649,7 +763,8 @@ class UNet(nn.Module):
             x_ds = x_ds + x_shortcut
             x_ds = block(x = x_ds, edge_index = edge_index, edge_weight = edge_weight, batch = batch, sel_mtrx = C_shortcut.to(x_ds.device),
                          cond = cond_emb_shortcut,
-                         t = t_emb_shortcut
+                         t = t_emb_shortcut,
+                         debug_print = debug_print
                          )
 
         return x_ds

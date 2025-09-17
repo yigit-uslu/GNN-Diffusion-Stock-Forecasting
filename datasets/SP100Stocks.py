@@ -61,6 +61,7 @@ class SP100Stocks(Dataset):
 	def __init__(self, root: str = "../data/SP100/", values_file_name: str = "values.csv", adj_file_name: str = "adj.npy", past_window: int = 25, future_window: int = 1,
 			  target_column_name: str = "NormClose",
 			  corr_threshold: float = None,
+			  pool_ratio: float = 0.5,
 			  force_reload: bool = False, transform: Callable = None):
 		self.values_file_name = values_file_name
 		self.adj_file_name = adj_file_name
@@ -68,6 +69,7 @@ class SP100Stocks(Dataset):
 		self.future_window = future_window
 		self.target_column_name = target_column_name
 		self.corr_threshold = corr_threshold
+		self.pool_ratio = pool_ratio 
 		super().__init__(root, force_reload=force_reload, transform=transform)
 
 	@property
@@ -89,7 +91,8 @@ class SP100Stocks(Dataset):
 		x, close_prices, edge_index, edge_weight, info_dict = get_graph_in_pyg_format(
 			values_path=osp.join(self.root, f"raw/{self.values_file_name}"),
 			adj_path=osp.join(self.root, f"raw/{self.adj_file_name}"),
-			target_column_name=self.target_column_name
+			target_column_name=self.target_column_name,
+			pool_ratio=self.pool_ratio
 		)
 
 		self.info = info_dict

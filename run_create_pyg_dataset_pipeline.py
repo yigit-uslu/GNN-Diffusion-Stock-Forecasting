@@ -257,6 +257,7 @@ def create_pyg_graphs(args, arg_groups, accelerator, experiment_name) -> Dataset
                           future_window=arg_groups["dataset"].future_window, # 1
                           target_column_name=arg_groups["dataset"].target_column_name, # "NormClose"
                           corr_threshold=arg_groups["dataset"].corr_threshold if arg_groups["dataset"].temporal_correlation_graph is True else None, # 0.7
+                          pool_ratio=arg_groups["CD-model"].pool_ratio
                           )
     
     accelerator.print("SP100Stocks dataset: ", dataset)

@@ -124,7 +124,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
     def make_validation_criteria_fnc(self):
         # return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
-        return make_validation_criteria_fnc(min_epoch=50, validate_freq=50, max_loss = 0.50)
+        return make_validation_criteria_fnc(min_epoch=50, validate_freq=100, max_loss = 0.50)
         # return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
     
 

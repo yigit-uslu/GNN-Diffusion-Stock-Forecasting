@@ -114,6 +114,8 @@ def plot_regression(preds, target, observations, timestamps = None, fig = None, 
     metric = kwargs.get("metric", "Log Return")
     stock_idx = kwargs.get("stocks_idx", 0)
 
+    grw_preds = kwargs.get("grw_preds", None)
+
     B, future_window, nsamples = preds.shape
     past_window = observations.shape[1]
 
@@ -127,7 +129,7 @@ def plot_regression(preds, target, observations, timestamps = None, fig = None, 
 
     with sns.axes_style("darkgrid"):
         if fig is None or axs is None:
-            fig, axs = plt.subplots(nrows = int(np.ceil(B/ 2)), ncols = 2, figsize = (12, 6), squeeze = False)
+            fig, axs = plt.subplots(nrows = int(np.ceil(B / 2)), ncols = 2 if B > 1 else 1, figsize = (12, 6), squeeze = False)
 
         assert B <= len(axs.flatten()), "Number of timestamps to plot exceeds number of subplots available."
 
@@ -137,8 +139,30 @@ def plot_regression(preds, target, observations, timestamps = None, fig = None, 
             target_cts = np.concatenate([observations[idx, -1:].reshape(1), target[idx].reshape(-1)])  # [future_window + 1]
             preds_cts = np.concatenate([np.repeat(observations[idx, -1:].reshape(1, 1), repeats=nsamples, axis=1), preds[idx]], axis=0)  # [future_window + 1, nsamples]
 
+            # Compute a confidence band for predictions if nsamples > 1
+            if nsamples > 1:
+                pred_mean = preds_cts.mean(axis=1)  # [future_window + 1]
+                pred_std = preds_cts.std(axis=1)    # [future_window + 1]
+                ci_multiplier = 1.96  # For ~95% confidence interval
+                lower_bound = pred_mean - ci_multiplier * pred_std
+                upper_bound = pred_mean + ci_multiplier * pred_std
+
+                ax.fill_between(timestamps[idx, -future_window-1:], lower_bound, upper_bound, color='green', alpha=0.2, label=None)
+
+                if grw_preds is not None:
+                    grw_pred_cts = np.concatenate([np.repeat(observations[idx, -1:].reshape(1, 1), repeats=nsamples, axis=1), grw_preds[idx]], axis=0)  # [future_window + 1, nsamples]
+
+                    # Compute a confidence band for grw predictions if nsamples > 1
+                    grw_pred_mean = grw_pred_cts.mean(axis=1)  # [future_window + 1]
+                    grw_pred_std = grw_pred_cts.std(axis=1)    # [future_window + 1]
+                    grw_lower_bound = grw_pred_mean - ci_multiplier * grw_pred_std
+                    grw_upper_bound = grw_pred_mean + ci_multiplier * grw_pred_std
+                    ax.fill_between(timestamps[idx, -future_window-1:], grw_lower_bound, grw_upper_bound, color='red', alpha=0.2, label=None)
+
             ax.plot(timestamps[idx, :past_window], observations[idx], label="Observations", color='black')
-            ax.plot(timestamps[idx, -future_window-1:], preds_cts, linestyle = '--', alpha = 0.7, label="Predictions" if nsamples == 1 else None)
+            ax.plot(timestamps[idx, -future_window-1:], preds_cts[:, :min(10, preds_cts.shape[-1])], linestyle = '--',
+                    alpha = 0.8, # 0.7
+                    label="Predictions" if nsamples == 1 else None)
             ax.plot(timestamps[idx, -future_window-1:], target_cts, marker = 'd', markersize = 4, markevery = 10, label="Target")
 
             # # Connect last plotted point of observations to first plotted point of predictions

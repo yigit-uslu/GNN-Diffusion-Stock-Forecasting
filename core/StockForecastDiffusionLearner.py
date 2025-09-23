@@ -396,8 +396,9 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
         eval_metrics.update(error_dict)
 
-
-        plot_stocks_idx = np.random.choice(num_stocks, size = 4, replace = False)
+        # num_plots = 4
+        num_plots = 20
+        plot_stocks_idx = np.random.choice(num_stocks, size = num_plots, replace = False)
         plot_timestamps_idx = torch.randint(0, len(obs_and_pred_timestamps), size = (2,), device=obs_and_pred_timestamps.device)
 
         for stock_idx in plot_stocks_idx:
@@ -449,8 +450,11 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                                 timestamps = obs_and_pred_timestamps[plot_timestamps_idx].detach().cpu(),
                                 metric = "Log returns",
                                 stocks_idx = stock_idx,
+                                grw_preds = grw_pred_log_returns[plot_timestamps_idx, stock_idx, :, :].detach().cpu()
                                 )
+            
             eval_metrics.update({f"{k}_gdm": v for k, v in temp_dict.items()})
+            eval_metrics.update({f"{k}_gdm-stock_{stock_idx}": v for k, v in temp_dict.items()})
 
 
         
@@ -462,7 +466,9 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                                 metric = "Log returns",
                                 stocks_idx = stock_idx,
                                 )
+            
             eval_metrics.update({f"{k}_grw": v for k, v in temp_dict.items()})
+            eval_metrics.update({f"{k}_grw-stock_{stock_idx}": v for k, v in temp_dict.items()})
 
             
             # temp_dict = log_plot_regression(preds = cgrw_pred_log_returns[plot_timestamps_idx, stock_idx, :, :].detach().cpu(),
@@ -710,8 +716,8 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
 
                     # Sample from the trained model and regress
-                    for eval_phase in ["train-val", "val"]:
-                        nsamples = 10 # 50
+                    for eval_phase in ["train-val", "val", "test"]:
+                        nsamples = 20 # 10
                         eval_metrics = self.eval(accelerator=accelerator, model = model, data = next(iter(dataloader[eval_phase])), nsamples = nsamples, device = device, sampler = "ddpm")
                         log_dict.update({f"{self.__class__.__name__}-Evaluation/{eval_phase}-{k}": v for k, v in eval_metrics.items()})
 

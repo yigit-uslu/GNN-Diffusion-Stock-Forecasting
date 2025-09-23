@@ -88,10 +88,10 @@ class GraphConvLayer(nn.Module):
         #     edge_weight = edge_weight  # [num_edges] or None
 
         # Use sparse adjacency tensor for edge_index and edge_weight in convolutional layer
-        adj_csr = to_torch_csr_tensor(edge_index, edge_weight_scalar, x.size(0))
+        # adj_csr = to_torch_csr_tensor(edge_index, edge_weight_scalar, x.size(0))
 
         for conv, norm, act, dropout, pool in zip(self.conv_layers, self.norm_layers, self.act_layers, self.dropout_layers, self.pooling_layers):
-            x = conv(x, edge_index=adj_csr, edge_weight=edge_weight_scalar)
+            x = conv(x, edge_index=edge_index, edge_weight=edge_weight_scalar)
             x = act(x)
             x = dropout(x)
             x = norm(x)

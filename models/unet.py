@@ -6,8 +6,9 @@ import torch.nn as nn
 from torch_geometric.nn import TAGConv
 from torch_geometric.nn import MLP as pyg_mlp
 from typing import Tuple, Optional, Union, List
-from models.unet_embedding_utils import ConditionalEmbeddingLayer, Squeeze, SwapAxes
-from models.unet_utils import get_nn_conv1d_parameters, debug_print, inspect_tensor, pool_neighboring_features, pool_two_neighborhood_features
+from models.TemporalConvLayers import TemporalConvLayer
+from models.unet_embedding_utils import Chop, ConditionalEmbeddingLayer, Squeeze, SwapAxes
+from models.unet_utils import get_nn_conv1d_parameters, debug_print, inspect_tensor, pool_neighboring_features, pool_two_neighborhood_features, resolve_conv_type
 from torch_geometric.utils import to_torch_csr_tensor
 
 
@@ -110,8 +111,9 @@ class GraphConvLayer(nn.Module):
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, in_timesteps, out_timesteps,
-                 hidden_channels = None, 
-                 gnn_kws: dict = {"K": 2}):
+                 hidden_channels = None,
+                 temporal_conv_kws: dict = None,
+                 gnn_kws: dict = None):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels # this should be halved if conditioning is concatenated to the output later
@@ -122,19 +124,59 @@ class ResidualBlock(nn.Module):
         self.cond_embed_strategy = "concat" # "add" or "concat"
         graph_conv_in_channels = self.hidden_channels * 2 if self.cond_embed_strategy == "concat" else self.hidden_channels
 
-        # if out_timesteps == in_timesteps // 2:
-            # Testing conv1d params utility function. 
+        # Start with default temporal-conv-kws and update with provided kws
+        self.temporal_conv_kws = self.default_temporal_conv_kws.copy()
+        if temporal_conv_kws is not None:
+            print("Updating temporal_conv_kws with provided kws: {}".format(temporal_conv_kws))
+            self.temporal_conv_kws.update(temporal_conv_kws)
+
+        # Start with default gnn_kws and update with provided kws
+        self.gnn_kws = self.default_gnn_kws.copy()
+        if gnn_kws is not None:
+            print("Updating gnn_kws with provided kws: {}".format(gnn_kws))
+            self.gnn_kws.update(gnn_kws)
+
         
+        # self.init_temporal_conv_layer()
+        self.init_temporal_conv_block()
+    
+        
+        # self.conv2 = nn.Linear(out_channels, out_channels)
+        self.graph_conv_block = GraphConvLayer(in_channels = graph_conv_in_channels, # out_channels,
+                                                out_channels = self.out_channels,
+                                                K = self.gnn_kws["K"],
+                                                dropout = self.gnn_kws["dropout"],
+                                                num_layers = self.gnn_kws["num_layers"],
+                                                pool = self.gnn_kws["pool"],
+                                                )
+
+        if self.in_channels != self.out_channels or self.T_in != self.T_out:
+            self.res_connection = nn.Sequential(nn.Linear(self.T_in, self.T_out), SwapAxes(2, 1), nn.Linear(self.in_channels, self.out_channels), SwapAxes(2,1))
+            # self.residual = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.res_connection = nn.Identity()
+
+
+    @property
+    def default_temporal_conv_kws(self):
+        return {"kernel_size": 3, "convolution_type": "mlp"}
+    
+    @property
+    def default_gnn_kws(self):
+        return {"K": 2, "dropout": 0.0, "num_layers": 2, "pool": "none"}
+    
+
+    def get_temporal_conv_layer(self):
         if self.T_in == self.T_out:
             # No need for convolution in time dimension if temporal dimensions are the same
             print("No temporal dimension change in ResidualBlock, using linear projection for temporal dimension.")
             if self.in_channels == self.hidden_channels:
-                self.conv1 = nn.Identity()
+                conv1 = nn.Identity()
             else:
-                self.conv1 = nn.Linear(self.in_channels, self.hidden_channels)
+                conv1 = nn.Linear(self.in_channels, self.hidden_channels)
         else:
-            conv_params = get_nn_conv1d_parameters(self.T_in, self.T_out, kernel_size=5)
-            self.conv1 = nn.Conv1d(self.in_channels,
+            conv_params = get_nn_conv1d_parameters(self.T_in, self.T_out, kernel_size=self.temporal_conv_kws["kernel_size"])
+            conv1 = nn.Conv1d(self.in_channels,
                                     self.hidden_channels,
                                     kernel_size=conv_params["kernel_size"],
                                     padding=conv_params["padding"],
@@ -145,31 +187,86 @@ class ResidualBlock(nn.Module):
         #     self.conv1 = nn.Sequential(SwapAxes(2, 1), nn.Linear(self.in_channels, self.hidden_channels), SwapAxes(2, 1))
         # else:
         #     raise ValueError("out_timesteps must be either  = in_timesteps // 2 or = in_timesteps.")
-        
-        # self.bn1 = nn.BatchNorm1d(out_channels)
-        self.bn1 = nn.LayerNorm([self.hidden_channels, self.T_out])
-        self.act = nn.ReLU()
+        return conv1
+    
 
-        self.temporal_conv_block = nn.Sequential(
-            self.conv1,
-            self.act,
-            self.bn1,
-        )
-        
-        # self.conv2 = nn.Linear(out_channels, out_channels)
-        self.graph_conv_block = GraphConvLayer(in_channels = graph_conv_in_channels, # out_channels,
-                                                out_channels = self.out_channels,
-                                                K = gnn_kws.get("K", 2),
-                                                dropout = gnn_kws.get("dropout", 0.0),
-                                                num_layers = gnn_kws.get("num_layers", 2),
-                                                pool = gnn_kws.get("pool", "none"),
-                                                )
+    def init_temporal_conv_block(self):
 
-        if self.in_channels != self.out_channels or self.T_in != self.T_out:
-            self.res_connection = nn.Sequential(nn.Linear(self.T_in, self.T_out), SwapAxes(2, 1), nn.Linear(self.in_channels, self.out_channels), SwapAxes(2,1))
-            # self.residual = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        conv_type = resolve_conv_type(self.temporal_conv_kws["convolution_type"])
+
+        if conv_type in ["mlp", "conv1d"]:
+            conv = self.get_temporal_conv_layer()
+            # self.bn1 = nn.BatchNorm1d(out_channels)
+            norm_layer = nn.LayerNorm([self.hidden_channels, self.T_out])
+            act = nn.ReLU()
+
+            self.temporal_conv_block = nn.Sequential(
+                conv,
+                act,
+                norm_layer,
+            )
+
+        elif conv_type == "residual-causal-conv1d":
+            print("Using residual causal conv1d for temporal conv block.")
+            kernel_size = self.temporal_conv_kws["kernel_size"]
+            dilation = 1
+            stride = 1
+            padding = (kernel_size - 1) * dilation  # For causal conv1d
+
+            conv = nn.Conv1d(self.in_channels, self.hidden_channels, kernel_size = kernel_size,
+                             padding = padding, stride = stride, dilation = dilation)
+            
+
+            chop = Chop(dim = -1, chop_size = padding)  # Remove extra padding to maintain causality
+
+            norm_layer = nn.LayerNorm([self.hidden_channels, self.T_out])
+            act = nn.ReLU()
+
+            if self.hidden_channels != self.in_channels:
+                res_connection = nn.Conv1d(self.in_channels, self.hidden_channels, kernel_size=1)
+            else:
+                res_connection = nn.Identity()
+
+            self.temporal_conv_block = TemporalConvLayer(
+                conv,
+                chop,
+                act,
+                norm_layer,
+                res_connection
+            )
+
+
+        elif conv_type == "residual-gated-causal-conv1d":
+            print("Using residual gated causal conv1d for temporal conv block.")
+            kernel_size = self.temporal_conv_kws["kernel_size"]
+            dilation = 1
+            stride = 1
+            padding = (kernel_size - 1) # For causal conv1d
+
+            conv = nn.Conv1d(self.in_channels, 2 * self.hidden_channels, kernel_size = kernel_size,
+                             padding = padding, dilation = dilation, stride=stride)
+            
+            chop = Chop(dim = -1, chop_size = padding)  # Remove extra padding to maintain causality
+
+            norm_layer = nn.LayerNorm([self.hidden_channels, self.T_out])
+            act = nn.GLU(dim=-2)  # Gated Linear Unit activation
+
+            if self.hidden_channels != self.in_channels:
+                res_connection = nn.Conv1d(self.in_channels, self.hidden_channels, kernel_size=1)
+            else:
+                res_connection = nn.Identity()
+
+            self.temporal_conv_block = TemporalConvLayer(
+                conv,
+                chop,
+                act,
+                norm_layer,
+                res_connection
+            )
+
         else:
-            self.res_connection = nn.Identity()
+            raise ValueError("temporal_conv_kws['convolution-type'] must be either 'mlp' or 'causal-conv1d + residual-connections'.")
+            
 
 
     def forward(self, x, edge_index = None, edge_weight = None, batch = None,
@@ -440,6 +537,7 @@ class Block(nn.Module):
 
 class DownBlock(Block):
     def __init__(self, in_channels, in_nodes, in_timesteps,
+                 temporal_conv_kws: dict,
                  gnn_kws: dict,
                   ds_factor: Union[int, float] = 2, # float for upsampling
                  out_channels = None, out_nodes = None, out_timesteps = None,
@@ -453,6 +551,7 @@ class DownBlock(Block):
                                                  )
 
         self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.in_timesteps, out_timesteps = self.out_timesteps,
+                                       temporal_conv_kws = temporal_conv_kws,
                                        gnn_kws = gnn_kws
                                        )
 
@@ -488,6 +587,7 @@ class DownBlock(Block):
 class UpBlock(Block):
     def __init__(self, in_channels, in_nodes, in_timesteps,
                  gnn_kws: dict,
+                 temporal_conv_kws: dict,
                  us_factor: int = 2, out_nodes = None, out_channels = None, out_timesteps = None,
                  graph_pool = None, depth: int = None):
         
@@ -517,6 +617,7 @@ class UpBlock(Block):
 
 
         self.res_block = ResidualBlock(self.in_channels, self.out_channels, in_timesteps = self.out_timesteps, out_timesteps = self.out_timesteps,
+                                       temporal_conv_kws = temporal_conv_kws,
                                        gnn_kws = gnn_kws)
         
         if graph_pool is not None:
@@ -605,6 +706,8 @@ class UNet(nn.Module):
     def __init__(self, F_in, N_in, T_in, downsample_factor: List[Union[Union[int, float], Tuple[Union[int, float], Union[int, float]]]],
                  cond_kws: dict,
                  gnn_kws: dict,
+                 temporal_conv_kws: dict,
+                 cond_embed_kws: dict,
                  F_min = 2, N_min = 2, T_min = 4,
                  ):
         super().__init__()
@@ -656,12 +759,14 @@ class UNet(nn.Module):
                                  out_channels=F_1, out_nodes=N_1, out_timesteps=T_1,
                                  ds_factor=feature_ds_factor, # this ds factor is redundant
                                  depth=depth,
+                                 temporal_conv_kws=temporal_conv_kws,
                                  gnn_kws=gnn_kws
                                  )
             ds_blocks.append(ds_block)
 
             cond_embed_layer = ConditionalEmbeddingLayer(in_channels=cond_F_in, out_channels=F_0,
-                                                         in_timesteps=cond_T_in, out_timesteps=T_1) # T_1 but F_0 because conditioning is applied after temporal DR and before graph conv
+                                                         in_timesteps=cond_T_in, out_timesteps=T_1,
+                                                         cond_embed_kws=cond_embed_kws) # T_1 but F_0 because conditioning is applied after temporal DR and before graph conv
             cond_embed_layers.append(cond_embed_layer)
 
             time_embed_layer = nn.Sequential(nn.Linear(self.F_in, F_0))
@@ -671,6 +776,7 @@ class UNet(nn.Module):
             us_block = UpBlock(in_channels=F_1, out_channels=F_0,
                                in_nodes=N_1, out_nodes=N_0, in_timesteps=T_1, out_timesteps=T_0,
                                graph_pool=ds_block.graph_pool, depth=depth,
+                               temporal_conv_kws=temporal_conv_kws,
                                gnn_kws=gnn_kws
                                )
             us_blocks.append(us_block)
@@ -687,7 +793,7 @@ class UNet(nn.Module):
 
     @property
     def depth(self):
-        return len(self.downsample_factor)
+        return len(self.downsample_factor_list)
 
         
     def forward(self, x: torch.Tensor, t: torch.Tensor, cond: torch.Tensor, batch:torch.Tensor, edge_index: torch.Tensor = None, edge_weight: torch.Tensor = None,

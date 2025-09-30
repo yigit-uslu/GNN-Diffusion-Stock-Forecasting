@@ -8,7 +8,7 @@ import wandb
 import abc
 
 from core.GRW import GeometricRandomWalk as GRW
-from datasets.utils import daily_log_returns_to_closing_prices, daily_log_returns_to_log_returns, gather_target_preds_observations_and_timestamps, run_correlated_geometric_random_walk_baseline, run_geometric_random_walk_baseline
+from datasets.SP100.utils import daily_log_returns_to_closing_prices, daily_log_returns_to_log_returns, gather_target_preds_observations_and_timestamps, run_correlated_geometric_random_walk_baseline, run_geometric_random_walk_baseline
 from models.eval import get_probabilistic_errors, get_regression_errors
 from models.utils import log_plot_regression, log_regression_errors
 from utils.diffusion_model_utils import save_cd_train_chkpt
@@ -124,7 +124,7 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
 
     def make_validation_criteria_fnc(self):
         # return make_validation_criteria_fnc(min_epoch=20, validate_freq=20, max_loss = 0.90)
-        return make_validation_criteria_fnc(min_epoch=50, validate_freq=100, max_loss = 0.50)
+        return make_validation_criteria_fnc(min_epoch=50, validate_freq=1000, max_loss = 0.50)
         # return make_validation_criteria_fnc(min_epoch=100, validate_freq=200, max_loss = 0.50)
     
 
@@ -163,12 +163,18 @@ class StockPriceForecastDiffusionLearner(ConditionalDiffusionLearner):
                     # Predict noise
                     pred_noise = model(noisy_y_t, timesteps, data)
 
+                    # Predict x_0 from the predicted noise
+                    pred_x0 = self.noise_pred_to_x0(noisy_y_t, timesteps, pred_noise)
+
                     # Compute the diffusion loss as the validation metric.
                     loss = self.loss_fn(pred_noise, eps).mean()
+                    recon_loss = self.loss_fn(pred_x0, y_0).mean()
                     val_metrics["loss"].append(loss)
+                    val_metrics["recon_loss"].append(recon_loss)
 
 
         val_metrics["loss"] = sum(val_metrics["loss"]) / len(val_metrics["loss"]) if val_metrics["loss"] else 0.0
+        val_metrics["recon_loss"] = sum(val_metrics["recon_loss"]) / len(val_metrics["recon_loss"]) if val_metrics["recon_loss"] else 0.0
 
         return val_metrics
 

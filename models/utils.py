@@ -102,9 +102,13 @@ def get_diffusion_model_architecture(args, n_features_in, n_features_out, num_no
                                             k_hops = args.k_hops,
                                             dropout=args.dropout_rate,
                                             num_gnn_layers_per_block=args.n_convs_per_block,
+                                            tconv_kernel_size=args.tconv_kernel_size,
+                                            tconv_kernel_type=args.tconv_kernel_type,
                                             future_window = n_features_out,
                                             past_window = timesteps_cond,
-                                            cond_num_features = n_features_cond
+                                            cond_num_features = n_features_cond,
+                                            cond_tconv_kernel_size=args.cond_tconv_kernel_size,
+                                            cond_tconv_kernel_type=args.cond_tconv_kernel_type
                                             )
 
     return model

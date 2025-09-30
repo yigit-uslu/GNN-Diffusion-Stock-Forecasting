@@ -16,8 +16,10 @@ class GUNet(nn.Module):
                  hidden_channels: int = 64, # initial hidden feature dimension in the UNet
                  hidden_timesteps: int = None, # initial hidden temporal dimension in the UNet
                  in_channels: int = 1, # input node feature dimension
-                 out_channels: int = 5,
-                 gnn_kws: dict = {}): # Same as future window
+                 out_channels: int = 5, # Same as future window
+                 gnn_kws: dict = {},
+                 temporal_conv_kws: dict = {},
+                 cond_embed_kws: dict = {}):
         super(GUNet, self).__init__()
 
         self.out_channels = out_channels
@@ -68,6 +70,8 @@ class GUNet(nn.Module):
                         downsample_factor=sampling_factor,
                         cond_kws = {"in_channels": cond_in_channels, "in_timesteps": cond_in_timesteps, "hidden_channels": hidden_channels, "hidden_timesteps": hidden_timesteps},
                         gnn_kws = gnn_kws, # GNN specific parameters
+                        temporal_conv_kws = temporal_conv_kws, # Temporal convolution specific parameters
+                        cond_embed_kws = cond_embed_kws, # Temporal conv specific parameters used for conditioning
                         # cond_F_in=cond_in_channels, cond_T_in=cond_in_timesteps,
                         )
         
@@ -132,11 +136,13 @@ class StockForecastDiffusionGUNet(nn.Module):
     def __init__(self, depth: int = 3,
                  sampling_factor: Union[int, List[int]] = 2,
                  graph_pooling_factor: float = 2.0,
-                 k_hops: int = 2, num_gnn_layers_per_block: int = 2, dropout: float = 0.1,
+                 k_hops: int = 2, num_gnn_layers_per_block: int = 2, dropout: float = 0.1, # gnn configs that we overwrite
+                 tconv_kernel_size: int = 3, tconv_kernel_type: str = "mlp", # temporal conv configs that we overwrite
                  hidden_channels: int = 64,
                  future_window: int = 5,
                  past_window: int = 20,
                  cond_num_features: int = 8,
+                 cond_tconv_kernel_size: int = 3, cond_tconv_kernel_type: str = "conv1d", # temporal conv configs for conditioning that we overwrite
                  ):
         super(StockForecastDiffusionGUNet, self).__init__()
         self.gunet = GUNet(depth = depth, sampling_factor = sampling_factor, hidden_channels = hidden_channels,
@@ -144,7 +150,9 @@ class StockForecastDiffusionGUNet(nn.Module):
                            cond_in_timesteps = past_window, 
                            cond_in_channels = cond_num_features,
                            graph_pooling_factor = graph_pooling_factor,
-                           gnn_kws = {"K": k_hops, "num_layers": num_gnn_layers_per_block, "dropout": dropout}
+                           gnn_kws = {"K": k_hops, "num_layers": num_gnn_layers_per_block, "dropout": dropout},
+                           temporal_conv_kws = {"kernel_size": tconv_kernel_size, "convolution_type": tconv_kernel_type},
+                           cond_embed_kws = {"kernel_size": cond_tconv_kernel_size, 'convolution_type': cond_tconv_kernel_type}
                            )
 
 

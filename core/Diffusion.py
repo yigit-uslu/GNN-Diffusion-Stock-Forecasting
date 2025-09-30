@@ -126,6 +126,13 @@ class DiffusionLearner(abc.ABC):
         return score, noise_pred
     
 
+    def noise_pred_to_x0(self, x_t, timestep, noise_pred):
+        """ Convert noise prediction to x0 prediction. """
+        # sqrt_alphas_cumprod = self.baralphas[timestep].pow(0.5)
+        sqrt_1m_alphas_cumprod = (1 - self.baralphas[timestep]).pow(0.5)
+        return (x_t - sqrt_1m_alphas_cumprod * noise_pred) / (self.baralphas[timestep].pow(0.5) + 1e-8)
+
+
     def accelerated_sample(self, model, data, sampler = 'ddpm', nsamples = 100, device = 'cpu', **kwargs):
         n_graphs_per_batch = kwargs.get('n_graphs_per_batch', None)
         eta = kwargs.get('eta', 0.2)

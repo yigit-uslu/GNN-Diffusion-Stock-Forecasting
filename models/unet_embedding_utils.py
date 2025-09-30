@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from typing import List, Tuple, Optional
 
-from models.unet_utils import get_nn_conv1d_parameters
+from models.TemporalConvLayers import TemporalConvLayer
+from models.unet_utils import get_nn_conv1d_parameters, resolve_conv_type
 
 
 class Squeeze(nn.Module):
@@ -23,6 +24,22 @@ class SwapAxes(nn.Module):
 
     def forward(self, x):
         x = torch.swapaxes(x, self.dim0, self.dim1)
+        return x
+    
+
+
+class Chop(nn.Module):
+    def __init__(self, chop_size: int, dim: int = -1, chop_from_end: bool = True):
+        super().__init__()
+        self.chop_size = chop_size
+        self.dim = dim
+        self.chop_from_end = chop_from_end
+
+    def forward(self, x):
+        if self.chop_from_end:
+            x = torch.index_select(x, self.dim, torch.arange(x.size(self.dim) - self.chop_size).to(x.device))
+        else:
+            x = torch.index_select(x, self.dim, torch.arange(self.chop_size, x.size(self.dim)).to(x.device))
         return x
     
 
@@ -56,11 +73,20 @@ class SinusoidalTimeEmbedding(nn.Module):
     
 
 class ConditionalEmbeddingLayer(nn.Module):
-    def __init__(self, in_channels: int, in_timesteps: int, out_channels: int, out_timesteps: int):
+    def __init__(self, in_channels: int, in_timesteps: int, out_channels: int, out_timesteps: int,
+                 cond_embed_kws: dict = None):
         super(ConditionalEmbeddingLayer, self).__init__()
 
+
+        # Override default kws if provided
+        self.cond_embed_kws = self.default_cond_embed_kws.copy()
+        if cond_embed_kws is not None:
+            print("Updating cond_embed_kws with provided kws: {}".format(cond_embed_kws))
+            self.cond_embed_kws.update(cond_embed_kws)
+
         # Define any layers or parameters needed for the conditional embedding here.
-        if in_timesteps is None or out_timesteps is None or in_timesteps == out_timesteps:
+        if in_timesteps is None or out_timesteps is None:
+            # or in_timesteps == out_timesteps:
             print(f"Projecting only feature dimension for conditional embedding to F_0 = {out_channels}.")
             # If temporal dimensions are the same, only project feature dimension
             self.layer = nn.Sequential(
@@ -74,30 +100,122 @@ class ConditionalEmbeddingLayer(nn.Module):
         else:
             # Project both feature and temporal dimensions
             print(f"Projecting both feature and temporal dimensions for conditional embedding to F_0 = {out_channels}, T_0 = {out_timesteps}.")
+            conv_type = resolve_conv_type(self.cond_embed_kws["convolution_type"])
+
+
+            if conv_type in ["mlp", "conv1d"]:
+                # conv = self.get_temporal_conv_layer()
+                # # self.bn1 = nn.BatchNorm1d(out_channels)
+                # norm_layer = nn.LayerNorm([self.hidden_channels, self.T_out])
+                # act = nn.ReLU()
+
+                # self.temporal_conv_block = nn.Sequential(
+                #     conv,
+                #     act,
+                #     norm_layer,
+                # )
+                kernel_size = self.cond_embed_kws["kernel_size"]
+                dilation = 1
+                conv_params = get_nn_conv1d_parameters(in_channels=in_timesteps, out_channels=out_timesteps, kernel_size=kernel_size)
+                
+                self.layer = nn.Sequential(
+                    nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=conv_params["kernel_size"],
+                            padding=conv_params["padding"], stride=conv_params["stride"], dilation=dilation),
+                    nn.LeakyReLU(),
+                    nn.LayerNorm([out_channels, out_timesteps]),
+                )
+
+
+            elif conv_type == "causal-conv1d":
+                print("Using causal conv1d for cond-embeddding: temporal conv block.")
+                kernel_size = self.cond_embed_kws["kernel_size"]
+                dilation = 1
+                stride = int(in_timesteps // out_timesteps)
+                kernel_size = 2 * stride + 1
+                padding = (kernel_size - 1) * dilation // 2 + 1 # For causal conv1d
+                print("Cond-embed: Causal conv1d overwrites kernel_size from {} to {}".format(self.cond_embed_kws["kernel_size"], kernel_size))
+
+                conv = nn.Conv1d(in_channels, out_channels, kernel_size = kernel_size,
+                                padding = padding, dilation = dilation, stride = stride)
+
+
+                chop = Chop(dim = -1, chop_size = 1)  # Remove extra padding to maintain causality
+
+                norm_layer = nn.LayerNorm([out_channels, out_timesteps])
+                act = nn.LeakyReLU()
+
+                # if self.hidden_channels != self.in_channels:
+                #     res_connection = nn.Conv1d(self.in_channels, self.hidden_channels, kernel_size=1)
+                # else:
+                #     res_connection = nn.Identity()
+
+                # self.temporal_conv_block = TemporalConvLayer(
+                #     conv,
+                #     chop,
+                #     act,
+                #     norm_layer,
+                #     # res_connection
+                # )
+                self.layer = nn.Sequential(
+                    conv,
+                    chop,
+                    act,
+                    norm_layer,
+                )
+
+
+            elif conv_type == "gated-causal-conv1d":
+                print("Using gated causal conv1d for cond-embeddding: temporal conv block.")
+                kernel_size = self.cond_embed_kws["kernel_size"]
+                dilation = 1
+                stride = int(in_timesteps // out_timesteps)
+                kernel_size = 2 * stride + 1
+                padding = (kernel_size - 1) * dilation // 2 + 1 # For causal conv1d
+                print("Cond-embed: Causal conv1d overwrites kernel_size from {} to {}".format(self.cond_embed_kws["kernel_size"], kernel_size))
+
+                conv = nn.Conv1d(in_channels, 2 * out_channels, kernel_size=kernel_size,
+                                 padding=padding, dilation=dilation, stride=stride)
+
+                chop = Chop(dim=-1, chop_size=1)  # Remove extra padding to maintain causality
+
+                act = nn.GLU(dim=-2)  # Gated Linear Unit activation
+                norm_layer = nn.LayerNorm([out_channels, out_timesteps])
+
+
+                self.layer = nn.Sequential(
+                    conv,
+                    chop,
+                    act,
+                    norm_layer,
+                )
+        
+
+            else:
+                raise ValueError(f"Unsupported convolution type: {conv_type}")
+    
+
+            # kernel_size = 5
+            # conv_params = get_nn_conv1d_parameters(in_channels=in_timesteps, out_channels=out_timesteps, kernel_size=kernel_size)
+            
             # self.layer = nn.Sequential(
-            #     nn.Linear(in_timesteps, out_timesteps),
+            #     nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=conv_params["kernel_size"],
+            #               padding=conv_params["padding"], stride=conv_params["stride"], dilation=1),
             #     nn.LeakyReLU(),
-            #     nn.LayerNorm(out_timesteps),
-            #     SwapAxes(1, 2),
-            #     nn.Linear(in_channels, out_channels),
-            #     nn.LeakyReLU(),
-            #     nn.LayerNorm(out_channels),
-            #     SwapAxes(1, 2)
+            #     nn.LayerNorm([out_channels, out_timesteps]),
             # )
 
-            kernel_size = 5
-            conv_params = get_nn_conv1d_parameters(in_channels=in_timesteps, out_channels=out_timesteps, kernel_size=kernel_size)
-            
-            self.layer = nn.Sequential(
-                nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=conv_params["kernel_size"],
-                          padding=conv_params["padding"], stride=conv_params["stride"], dilation=1),
-                nn.LeakyReLU(),
-                nn.LayerNorm([out_channels, out_timesteps]),
-            )
 
     def forward(self, cond):
         # Implement the forward pass for the conditional embedding.
         return self.layer(cond)
+    
+
+    @property
+    def default_cond_embed_kws(self):
+        return {
+            'kernel_size': 5,
+            'convolution_type': 'conv1d'
+        }
 
 
 class UNetEmbeddingBlock(nn.Module):

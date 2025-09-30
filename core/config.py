@@ -5,7 +5,7 @@ import numpy as np
 import math
 import sys, os
 
-from datasets.utils import get_column_names
+from datasets.SP100.utils import get_column_names
 # from utils.channel_utils import convert_P_max_and_noise_PSD
 
 NUM_NODES = 100
@@ -276,6 +276,7 @@ def make_parser(parse_known_args=False):
     ### Dataset config ###
     dataset_args = parser.add_argument_group(title='dataset', description='Config args for dataset.')
     dataset_args.add_argument('--dataset_name', type=str, default="S&P 100", choices=["S&P 100"], help="Name of the dataset to use.")
+    dataset_args.add_argument('--dataset_split_strategy', type=str, default="random", choices=["chronological", "random"], help="Strategy to split the dataset into train/val/test sets.")
     dataset_args.add_argument('--data_dir', type=path_str, default='./SP100AnalysisWithGNNs/data/SP100/raw', help='Directory to load/store the dataset.')
     dataset_args.add_argument('--corr_threshold', type=float, default=0.7, help = 'Thresholding for the correlation matrix.')
     dataset_args.add_argument('--sector_bonus', type=float, default=0.05, help = 'Bonus for stocks sharing the same sector.')
@@ -338,6 +339,11 @@ def make_parser(parse_known_args=False):
     CD_model_args.add_argument('--attn_self_loop_fill_value_diffusion', type = str, default="max", help = 'How to fill self loops with GATv2Conv.')
     CD_model_args.add_argument('--apply_gcn_norm_diffusion', type = str2bool, default=False, help = 'Whether gcn norm is applied.')
     CD_model_args.add_argument('--attn_num_heads_diffusion', type = int, default=8, help = 'Number of graph-attention heads (GraphTransformer only). If set to NOne, graph-attention layers are replaced with graph-convolutional layers.')
+    CD_model_args.add_argument('--tconv_kernel_size', type = int, default=3, help = 'Temporal convolution kernel size (GraphUNet only).')
+    CD_model_args.add_argument('--tconv_kernel_type', type = str, default="mlp", choices = ["mlp", "conv1d", "residual-causal-conv1d", "residual-gated-causal-conv1d"], help = 'Temporal convolution kernel type (GraphUNet only).')
+    CD_model_args.add_argument('--cond_tconv_kernel_size', type = int, default=5, help = 'Temporal convolution kernel size for conditioning (GraphUNet only).')
+    CD_model_args.add_argument('--cond_tconv_kernel_type', type = str, default="conv1d", choices = ["mlp", "conv1d", "causal-conv1d", "gated-causal-conv1d"], help = 'Temporal convolution kernel type for conditioning (GraphUNet only).')
+
 
     # Load an experiment from file
     # parser.add_argument('--file', type=open, action=LoadFromFile, help = 'Load a configuration from a file.') 

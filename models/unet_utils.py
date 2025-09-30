@@ -249,3 +249,26 @@ def pool_neighboring_features(x, edge_index, edge_weight=None, pool = "max",
 
    
     return pooled_x, edge_index, edge_weight
+
+
+
+def resolve_conv_type(conv_type: str) -> str:
+
+    print(f"Resolving conv_type '{conv_type}'...")
+
+    supported_types = ["mlp", "conv1d", "causal-conv1d", "gated-causal-conv1d", "residual-causal-conv1d", "residual-gated-causal-conv1d"]
+
+    # Find the closest matching supported type
+    if conv_type not in supported_types:
+        # Compute Levenshtein distances to find the closest match
+        from difflib import get_close_matches
+        closest_matches = get_close_matches(conv_type, supported_types, n=1, cutoff=0.6)
+        if closest_matches:
+            closest_match = closest_matches[0]
+            print(f"Warning: conv_type '{conv_type}' not recognized. Using closest match '{closest_match}'.")
+            conv_type = closest_match
+
+        else:
+            raise ValueError(f"conv_type '{conv_type}' not recognized and no close match found. Supported types are: {supported_types}")
+
+    return conv_type

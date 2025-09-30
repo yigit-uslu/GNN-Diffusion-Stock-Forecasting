@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 from torch_geometric.data import Dataset, Data
 # from notebooks.datasets.utils import get_graph_in_pyg_format
-from datasets.utils import combine_edge_features, get_graph_in_pyg_format, get_column_idx
+from datasets.SP100.utils import combine_edge_features, get_graph_in_pyg_format, get_column_idx
 from utils.covariance_graph_utils import target_to_graph
 
 

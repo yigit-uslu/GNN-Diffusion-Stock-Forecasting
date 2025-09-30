@@ -5,7 +5,7 @@ import numpy as np
 
 import torch
 from torch_geometric.data import Dataset
-from datasets.SP100Stocks import SP100Stocks
+from datasets.SP100.SP100Stocks import SP100Stocks
 from torch_geometric.loader import DataLoader
 
 from torch.utils.data.sampler import WeightedRandomSampler
@@ -76,11 +76,20 @@ def split_dataset(args, arg_groups, dataset):
     
     # train_val_dataset = dataset[:int(len(dataset) * val_part):arg_groups["dataset"].future_window]
 
+    if arg_groups["dataset"].dataset_split_strategy == "chronological":
+        train_idx = torch.arange(0, int(len(dataset) * arg_groups["dataset"].train_dataset_fraction))
+        val_idx = torch.arange(int(len(dataset) * arg_groups["dataset"].train_dataset_fraction), int(len(dataset) * (arg_groups["dataset"].train_dataset_fraction + (1 - arg_groups["dataset"].train_dataset_fraction) / 2)), arg_groups["dataset"].future_window)
+        test_idx = torch.arange(int(len(dataset) * (arg_groups["dataset"].train_dataset_fraction + (1 - arg_groups["dataset"].train_dataset_fraction) / 2)), len(dataset), arg_groups["dataset"].future_window)
+        train_val_idx = torch.arange(0, int(len(dataset) * (1 - arg_groups["dataset"].train_dataset_fraction) / 2), arg_groups["dataset"].future_window)
     
-    train_idx, val_idx, test_idx, train_val_idx = \
-        split_dataset_indices(dataset_indices = list(range(len(dataset))),
-                              arg_groups = arg_groups
-        )
+    elif arg_groups["dataset"].dataset_split_strategy == "random":
+        train_idx, val_idx, test_idx, train_val_idx = \
+            split_dataset_indices(dataset_indices = list(range(len(dataset))),
+                                arg_groups = arg_groups
+            )
+        
+    else:
+        raise ValueError(f"Dataset split strategy {arg_groups['dataset'].dataset_split_strategy} not recognized. Should be one of ['chronological', 'random'].")
 
     print("Val dataset indices: ", val_idx)
     print("Test dataset indices: ", test_idx)
@@ -98,10 +107,29 @@ def create_dataloaders(args, arg_groups, accelerator, dataset) -> Union[DataLoad
 
     batch_size_train = arg_groups['CD-train-algo'].x_batch_size * arg_groups["CD-train-algo"].batch_size
 
-    train_idx, val_idx, test_idx, train_val_idx = \
-        split_dataset_indices(dataset_indices = list(range(len(dataset))),
-                              arg_groups = arg_groups
+    if arg_groups["dataset"].dataset_split_strategy == "chronological":
+        train_idx = torch.arange(0, int(len(dataset) * arg_groups["dataset"].train_dataset_fraction))
+        val_idx = torch.arange(train_idx[-1] + 1,
+                               int(len(dataset) * (arg_groups["dataset"].train_dataset_fraction + (1 - arg_groups["dataset"].train_dataset_fraction) / 2))
         )
+        test_idx = torch.arange(val_idx[-1] + 1,
+                                len(dataset)
+                                )
+        train_val_idx = torch.arange(0, int(len(dataset) * (1 - arg_groups["dataset"].train_dataset_fraction) / 2))
+
+        assert len(train_idx) > 0, "Training set is empty after splitting. Please adjust the train_dataset_fraction or chunk_size."
+        assert len(val_idx) > 0, "Validation set is empty after splitting. Please adjust the train_dataset_fraction or chunk_size."
+        assert len(test_idx) > 0, "Test set is empty after splitting. Please adjust the train_dataset_fraction or chunk_size."
+        assert len(train_val_idx) > 0, "Train-Val set is empty after splitting. Please adjust the train_dataset_fraction or chunk_size."
+
+
+    elif arg_groups["dataset"].dataset_split_strategy == "random":
+        train_idx, val_idx, test_idx, train_val_idx = \
+            split_dataset_indices(dataset_indices = list(range(len(dataset))),
+                                arg_groups = arg_groups
+            )
+    else:
+        raise ValueError(f"Dataset split strategy {arg_groups['dataset'].dataset_split_strategy} not recognized. Should be one of ['chronological', 'random'].")
     
     train_dataset = dataset.index_select(train_idx)
     val_dataset = dataset.index_select(val_idx[::arg_groups["dataset"].future_window])
